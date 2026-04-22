@@ -7,7 +7,7 @@
 
 set -e
 
-VAULT="${HF_VAULT_DIR:-$HOME/Obsidian/Higgsfield}"
+VAULT="${HF_VAULT_DIR:-$PWD/hf-projects}"
 PROJECTS="$VAULT/Projects"
 ERRORS_LOG="$VAULT/_runs/sweep-errors.md"
 

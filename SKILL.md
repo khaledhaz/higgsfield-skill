@@ -25,19 +25,19 @@ During execution, if anything becomes ambiguous — a content-policy stall, a mo
 When asked to **run a project** (by slug, or "run the inbox", or "run X and Y in parallel", or a scheduler sweep), enter engine mode. The authoritative contract is in `docs/2026-04-22-agentic-obsidian-engine-design.md`. This section is the execution playbook.
 
 ### Intake rules
-- The project note lives at `~/Obsidian/Higgsfield/Projects/<slug>.md`. The `status` frontmatter field is the lifecycle switch.
+- The project note lives at `$PWD/hf-projects/Projects/<slug>.md`. The `status` frontmatter field is the lifecycle switch.
 - Only edit the note inside `<!-- engine:begin -->`…`<!-- engine:end -->`, `## Questions`, `## Outputs`, `## Auto-edits made during this run`, and the `status`/`shots` frontmatter fields.
 - Before starting, read `git log --oneline -20` inside `~/.claude/skills/higgsfield/` and scan for recently-learned traps/workflows that might apply to this project.
 
 ### Phase sequence
 1. **Intake** — parse frontmatter (`python -c "import sys,yaml; ..."`), validate required fields, set `status: active`, append start line to execution log.
-2. **VO** (if `vo.script` present) — navigate to `/audio`, set model + voice + script in composer. **Read the waveform's mm:ss label from the DOM before clicking Generate** — this gives a duration estimate to plan against. Click Generate. Download the mp3 to `~/Higgsfield-out/<slug>/vo.mp3`. Run `engine/probe_duration.sh` to get the actual duration.
+2. **VO** (if `vo.script` present) — navigate to `/audio`, set model + voice + script in composer. **Read the waveform's mm:ss label from the DOM before clicking Generate** — this gives a duration estimate to plan against. Click Generate. Download the mp3 to `$PWD/hf-outputs/<slug>/vo.mp3`. Run `engine/probe_duration.sh` to get the actual duration.
 3. **Plan** — if `shots:` is empty in frontmatter, plan N shots + M transitions to fit the VO duration (or the explicit `duration:`). Write the plan into `shots:` frontmatter. If script has ambiguous beat count vs. target shot count, pause: append `### Q: <question>` under `## Questions`, set `status: paused`, return control to the user.
 4. **Images** — lazy-spawn up to min(N, 6) worker tabs on `/ai/image?model=nano-banana-pro`. Each submits one shot image. Download + QC-loop each (§ QC loop below).
 5. **Videos** — lazy-spawn up to min(N, 6) workers on `/ai/video` with Kling 3.0 selected. Each submits one shot animation. Download + QC-loop.
 6. **Transitions** — for each seamless pair, run `engine/extract_frames.sh <shotA> <shotB> <tmp-dir>`, then submit a Kling 3.0 Start+End-frame job with duration=3s (see [W11](references/workflows.md) and trap #21 for the commit mechanism).
 7. **Stitch** — build a manifest JSON from the clips+transitions+VO, call `engine/stitch.sh manifest.json`.
-8. **Finalize** — set `status: done` (or `partial` if any artifact failed), fill `## Outputs` with wiki-links, archive the verbose run log to `~/Obsidian/Higgsfield/_runs/<timestamp>-<slug>.md`.
+8. **Finalize** — set `status: done` (or `partial` if any artifact failed), fill `## Outputs` with wiki-links, archive the verbose run log to `$PWD/hf-projects/_runs/<timestamp>-<slug>.md`.
 
 ### Tab allocation (lazy-spawn, reuse across phases)
 - `main` — driver's primary. Not a composer.
@@ -93,11 +93,14 @@ The user can manage the cron via `CronList` / `CronDelete` (builtin tools).
 This is the concrete procedure Claude executes when told "run <slug>" (or when a scheduler sweep emits a slug). Follow these steps in order. Each step is one action.
 
 ### Pre-flight
-1. `bash ~/.claude/skills/higgsfield/engine/preflight.sh` — cleans stale SingletonLock (trap #20).
-2. `cd ~/.claude/skills/higgsfield && git log --oneline -20` — include recently-learned auto-edits in your working context.
+1. **Ensure vault exists in the current working folder**: `bash ~/.claude/skills/higgsfield/engine/init_vault.sh` — idempotent. Creates `$PWD/hf-projects/{Projects,_templates,_runs}` + the project template. Does NOT ask the user. Each working folder gets its own vault automatically.
+2. `bash ~/.claude/skills/higgsfield/engine/preflight.sh` — cleans stale SingletonLock (trap #20).
+3. `cd ~/.claude/skills/higgsfield && git log --oneline -20` — include recently-learned auto-edits in your working context.
+
+**Vault-location rule**: always resolve paths relative to the CURRENT working folder (`$PWD`) — never a hardcoded `~/Obsidian/...`. The vault is `$PWD/hf-projects/`. Project notes are `$PWD/hf-projects/Projects/<slug>.md`. Verbose run logs archive to `$PWD/hf-projects/_runs/`.
 
 ### Phase 0 — Intake
-1. Resolve slug: `NOTE=~/Obsidian/Higgsfield/Projects/<slug>.md`.
+1. Resolve slug: `NOTE=$PWD/hf-projects/Projects/<slug>.md`.
 2. Parse frontmatter: `python3 ~/.claude/skills/higgsfield/engine/parse_frontmatter.py "$NOTE"`.
 3. Branch on `status`:
    - `inbox` → proceed.
@@ -106,7 +109,7 @@ This is the concrete procedure Claude executes when told "run <slug>" (or when a
    - `done` / `failed` → refuse (explain how to restart).
    - `scheduled` → refuse (wait for cron).
 4. Flip status: `python3 ~/.claude/skills/higgsfield/engine/update_status.py "$NOTE" active`.
-5. Create output dir: `mkdir -p ~/Higgsfield-out/<slug>`.
+5. Create output dir: `mkdir -p $PWD/hf-outputs/<slug>`.
 6. Append to log: `[x] <ISO-timestamp> Phase 0 intake: status=active, output=<dir>`.
 
 ### Phase 1 — VO (skip if `vo` is null)
@@ -115,8 +118,8 @@ This is the concrete procedure Claude executes when told "run <slug>" (or when a
 3. Read waveform `mm:ss` estimate from DOM (pre-gen).
 4. Click Generate.
 5. Wait until audio is ready; extract MP3 CDN URL.
-6. `curl -sL -o ~/Higgsfield-out/<slug>/vo.mp3 <url>`.
-7. `ACTUAL=$(bash ~/.claude/skills/higgsfield/engine/probe_duration.sh ~/Higgsfield-out/<slug>/vo.mp3)`.
+6. `curl -sL -o $PWD/hf-outputs/<slug>/vo.mp3 <url>`.
+7. `ACTUAL=$(bash ~/.claude/skills/higgsfield/engine/probe_duration.sh $PWD/hf-outputs/<slug>/vo.mp3)`.
 8. If `|actual - estimate| > 0.5`, log the drift.
 9. Append to log: `[x] Phase 1 VO ✅ · <model>/<voice> · <actual>s · <cost>cr`.
 
@@ -158,14 +161,14 @@ Same shape as Phase 3, but:
 
 ### Phase 6 — Stitch
 1. Build `manifest.json` in-context (Claude writes JSON). Schema from parent spec §12 App D.
-2. `bash ~/.claude/skills/higgsfield/engine/stitch.sh ~/Higgsfield-out/<slug>/manifest.json`.
+2. `bash ~/.claude/skills/higgsfield/engine/stitch.sh $PWD/hf-outputs/<slug>/manifest.json`.
 3. Verify final MP4 exists and duration is within tolerance of planned total.
 4. Log: `[x] Phase 6 stitch ✅ · final <s>s · <MB>`.
 
 ### Phase 7 — Finalize
 1. Any `[!]` in log → `partial`; otherwise → `done`. `python3 ... update_status.py "$NOTE" <final>`.
 2. Fill `## Outputs` section with wiki-links to shot PNGs, shot MP4s, transitions, final MP4.
-3. Archive verbose run log: `cp $NOTE ~/Obsidian/Higgsfield/_runs/<slug>-<timestamp>.md`.
+3. Archive verbose run log: `cp $NOTE $PWD/hf-projects/_runs/<slug>-<timestamp>.md`.
 4. If any auto-edits landed during the run, append commit hashes + summaries to `## Auto-edits made during this run`.
 5. `browser_close` — free Chrome.
 6. Print completion summary.
@@ -187,7 +190,7 @@ Two dispatches in one message → parallel.
 ```
 Agent(description="QC shot 1", model="haiku",
       subagent_type="general-purpose",
-      prompt="Read ~/Higgsfield-out/<slug>/shot1.png. Prompt was: <prompt>. Check ≥4 of these elements are visible: <top-5 head-nouns + color-grade cues>. Report {status: PASS|FAIL, missing: [...], suggested_retry_prompt: <text if FAIL>}.")
+      prompt="Read $PWD/hf-outputs/<slug>/shot1.png. Prompt was: <prompt>. Check ≥4 of these elements are visible: <top-5 head-nouns + color-grade cues>. Report {status: PASS|FAIL, missing: [...], suggested_retry_prompt: <text if FAIL>}.")
 # ... one per shot, up to 6 parallel
 ```
 
@@ -237,7 +240,7 @@ During engine-mode runs, when you discover a new fact about Higgsfield's behavio
 
 ### Guardrails (strict — never bypass)
 1. **Append-only inside markers.** New content goes between the opening and closing marker tags. You do NOT delete or rewrite existing text. If a new finding directly contradicts an old statement, append a comment `<!-- superseded by auto-edit <YYYY-MM-DD> -->` to the old line — keep the old text for audit.
-2. **Markers must exist before writing.** Before any auto-edit, re-read the target file and confirm both the opening and closing markers are present. If markers are missing, skip the write, append a one-line failure note to `~/Obsidian/Higgsfield/_runs/skill-edit-failures.md`, and continue.
+2. **Markers must exist before writing.** Before any auto-edit, re-read the target file and confirm both the opening and closing markers are present. If markers are missing, skip the write, append a one-line failure note to `$PWD/hf-projects/_runs/skill-edit-failures.md`, and continue.
 3. **Rate limit: 5 auto-edits per project run.** Count writes per run. On the 6th attempted write, log the remaining finding to `_runs/skill-edit-deferred.md` instead of writing.
 4. **One commit per edit.** Commit format:
    ```

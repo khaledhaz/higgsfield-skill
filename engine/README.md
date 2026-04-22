@@ -7,7 +7,7 @@ Deterministic helpers called by the higgsfield skill during project execution. E
 | `probe_duration.sh` | ffprobe wrapper returning media duration in seconds | path to audio/video file | seconds on stdout (e.g. `42.34`) |
 | `extract_frames.sh` | Extract last frame of clip A + first frame of clip B for transitions | `<clipA> <clipB> <out-dir>` | writes `<out-dir>/clipA-last.png` and `<out-dir>/clipB-first.png` |
 | `stitch.sh` | Normalize + concatenate clips into a final MP4 per JSON manifest | path to manifest JSON | writes output MP4 at `manifest.output`, prints its duration to stdout |
-| `init_vault.sh` | Idempotent bootstrap of `~/Obsidian/Higgsfield/` vault | none | creates vault structure + template; exits 0 |
+| `init_vault.sh` | Idempotent bootstrap of `$PWD/hf-projects/` vault | none | creates vault structure + template; exits 0 |
 
 ## Testing
 

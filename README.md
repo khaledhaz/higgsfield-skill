@@ -26,7 +26,7 @@ Drop this directory into `~/.claude/skills/higgsfield/`. Claude Code picks up sk
 Bootstrap the Obsidian vault:
 ```bash
 bash engine/init_vault.sh
-# creates ~/Obsidian/Higgsfield/{Projects,_templates,_runs}
+# creates $PWD/hf-projects/{Projects,_templates,_runs}
 ```
 
 ## Requirements

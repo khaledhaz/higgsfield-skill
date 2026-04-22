@@ -1,11 +1,11 @@
 #!/bin/bash
-# init_vault.sh — idempotent Obsidian vault bootstrap for Higgsfield projects.
-# Default vault path: ~/Obsidian/Higgsfield
+# init_vault.sh — idempotent per-project vault bootstrap for Higgsfield.
+# Default vault path: $PWD/hf-projects  (i.e., inside whatever folder you run the skill from)
 # Override with: HF_VAULT_DIR=/some/path init_vault.sh
 
 set -e
 
-VAULT="${HF_VAULT_DIR:-$HOME/Obsidian/Higgsfield}"
+VAULT="${HF_VAULT_DIR:-$PWD/hf-projects}"
 
 mkdir -p "$VAULT/Projects"
 mkdir -p "$VAULT/_templates"
