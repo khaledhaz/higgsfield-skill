@@ -69,6 +69,50 @@ When natural-language intent is ambiguous, ask the user conversationally before 
 - Pause: append `### Q: <question>` under `## Questions`, set `status: paused`, stop.
 - Resume: user adds `### A: <answer>` below the Q. In Mode A/C, the engine polls the note's mtime every 30s while paused (up to 30 minutes). In Mode D, the next cron sweep picks up any `A:`-populated Paused projects.
 
+## Self-learning rules (skill auto-edit)
+
+During engine-mode runs, when you discover a new fact about Higgsfield's behavior (UI quirk, prompt pattern, content-policy rule, model parameter), write it back into the skill so the next run handles it natively.
+
+### What counts as a discovery worth recording
+- A UI control behaves differently than this skill documented (type, commit mechanism, default value, range).
+- A prompt-rewrite pattern that unblocked a QC failure (e.g., "adding 'no flash' anti-prompt fixed 80% of seam failures").
+- A new model parameter observed (e.g., duration range, aspect options, cost datum).
+- A recurring browser-automation glitch and its fix.
+- A content-policy rewording that consistently passes (e.g., "warship" → "naval vessel").
+
+### Non-triggers (do not auto-record)
+- Anything already documented in this skill.
+- One-off content rejections without a clear pattern.
+- User-specific style preferences (those go to the memory system under `~/.claude/projects/.../memory/`).
+- Your own creative choices about framing or composition.
+
+### Destination routing
+
+| Discovery type | File | Marker block |
+|---|---|---|
+| UI behavior, hidden control, commit mechanism | `references/traps.md` | `<!-- auto-edit:traps category=<name> -->` |
+| Prompt-rewrite pattern | `references/workflows.md` | `<!-- auto-edit:workflow w=<W-id> section=patterns -->` |
+| Model parameter or cost datum | `references/models.md` | `<!-- auto-edit:model m=<model-id> -->` |
+| Session-wide rule | `SKILL.md` "Current model availability" | `<!-- auto-edit:skill section=availability -->` |
+| User preference revealed mid-run | memory system | new file under `memory/` + MEMORY.md index |
+
+### Guardrails (strict — never bypass)
+1. **Append-only inside markers.** New content goes between the opening and closing marker tags. You do NOT delete or rewrite existing text. If a new finding directly contradicts an old statement, append a comment `<!-- superseded by auto-edit <YYYY-MM-DD> -->` to the old line — keep the old text for audit.
+2. **Markers must exist before writing.** Before any auto-edit, re-read the target file and confirm both the opening and closing markers are present. If markers are missing, skip the write, append a one-line failure note to `~/Obsidian/Higgsfield/_runs/skill-edit-failures.md`, and continue.
+3. **Rate limit: 5 auto-edits per project run.** Count writes per run. On the 6th attempted write, log the remaining finding to `_runs/skill-edit-deferred.md` instead of writing.
+4. **One commit per edit.** Commit format:
+   ```
+   auto-learn: <one-line summary>
+
+   Spec: <project-slug>
+   Run: <ISO timestamp>
+   Source event: <what triggered the discovery>
+   ```
+5. **Surface in the project note.** At finalize time, append every auto-edit commit (hash + one-line summary) to the project note's `## Auto-edits made during this run` section.
+
+### Pre-run context load
+At the start of every engine run, run `git log --oneline -20` in the skill dir and include the results in your own context. This prevents re-discovering the same thing and committing duplicate fixes.
+
 ## Current model availability (this session)
 
 - **Kling 2.5 Turbo is OFF-LIMITS when driven from Claude Code** — Generate clicks silently drop (no error, no "Generating" indicator, no queued job). Unknown cause. Use **Kling 3.0** instead. User will explicitly re-enable Kling 2.5 Turbo when it's fixed.
