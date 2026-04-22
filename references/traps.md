@@ -23,6 +23,13 @@ Credits you BUY (not plan-included monthly credits) die after 90 days per the Bu
 A tooltip says "Minimax Start & End Frame is available only when using 768p-1080p quality." So adding an End frame bumps you off any lower (cheaper) tier.
 
 <!-- auto-edit:traps category=cost -->
+
+### 22. Nano Banana Pro Unlimited toggle is sticky across resolution changes
+Switching NBP resolution (e.g., 4K → 2K via the resolution picker) does NOT auto-flip the Unlimited toggle. If the previous session had Unlimited=OFF (because you were at 4K), dropping to 2K leaves the toggle OFF and the button shows `Generate ✨ 2` instead of `Unlimited ✨`. Silent 2-credit surprise per gen.
+
+**Workaround**: after any resolution change on NBP, explicitly check the Unlimited switch and flip it ON if it isn't already. Or verify the Generate button label shows `Unlimited ✨` (not `Generate ✨ N`) before clicking.
+
+**Observed**: 2026-04-22 in the smoke-test Mode A run — first submit attempt was `Generate ✨ 2` at 2K, caught by the button-label rule, toggle flipped, re-submit was free.
 <!-- /auto-edit:traps -->
 
 ## Session-state traps (these waste gens on wrong inputs)
