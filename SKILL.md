@@ -24,6 +24,9 @@ During execution, if anything becomes ambiguous — a content-policy stall, a mo
 
 - **Kling 2.5 Turbo is OFF-LIMITS when driven from Claude Code** — Generate clicks silently drop (no error, no "Generating" indicator, no queued job). Unknown cause. Use **Kling 3.0** instead. User will explicitly re-enable Kling 2.5 Turbo when it's fixed.
 
+<!-- auto-edit:skill section=availability -->
+<!-- /auto-edit:skill -->
+
 ## The single rule that decides cost
 
 **`Generate ✨ N` means N credits will be charged. `Generate [Unlimited]` (black badge, no sparkle number) means free.** Toggles and "unlimited" badges lie; the button label doesn't.
