@@ -186,6 +186,9 @@ Concrete step-by-step flows for the most common tasks. Copy and adapt.
 
 **Sanity check on output**: the first frame of the transition should visibly match the last frame of clip A; the last frame should match the first frame of clip B. If it drifts, regenerate with a more constrained prompt or accept a cut instead.
 
+<!-- auto-edit:workflow w=W11 section=patterns -->
+<!-- /auto-edit:workflow -->
+
 ## W12 — Seedance with eligibility-check wait loop
 
 **Goal**: Use Seedance 2.0 (or Seedance Pro) on an input image that must pass Higgsfield's content-eligibility check. This check can stall on military/political/sensitive imagery.
@@ -205,6 +208,9 @@ Concrete step-by-step flows for the most common tasks. Copy and adapt.
 6. If Not Eligible: stop, report back to the user with the specific image that failed. Do not try to bypass by swapping models silently — the user decides.
 
 **Why the reload**: the check can deadlock client-side. Reload forces a fresh request to Higgsfield's moderation service.
+
+<!-- auto-edit:workflow w=W12 section=patterns -->
+<!-- /auto-edit:workflow -->
 
 ## W13 — VO-driven narrative video (Eleven v3 as the timing source)
 
@@ -239,6 +245,9 @@ Concrete step-by-step flows for the most common tasks. Copy and adapt.
 - Read the waveform duration label BEFORE generating the VO — saves credits and lets the shot plan be right on the first try.
 - Do not decide the number of shots, the shot length, or the transition style until you know the VO duration AND have the user's approval of the shot breakdown.
 - If the user has prior audio projects visible in the left sidebar (e.g., "Israel Iran Nuclear", "Modern Military Explorer"), ask whether they want to continue in one of those or start a "+ New project".
+
+<!-- auto-edit:workflow w=W13 section=patterns -->
+<!-- /auto-edit:workflow -->
 
 ## W14 — Storyboard-first generation
 
@@ -279,6 +288,9 @@ Concrete step-by-step flows for the most common tasks. Copy and adapt.
 - VO, if present, is overlaid on the full timeline after concat.
 
 **Always ask which mode** before spending credits on transition clips — they add ~8.75 credits each.
+
+<!-- auto-edit:workflow w=W15 section=patterns -->
+<!-- /auto-edit:workflow -->
 
 ## Gotcha cheat sheet (minimal form)
 
