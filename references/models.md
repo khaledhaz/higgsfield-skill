@@ -51,6 +51,9 @@ All reached via `/ai/image?model=<slug>`. Shared bar: prompt (Lexical editor), "
 
 **Aspect ratio options** (NBP verified; other models may have subsets): Auto, 1:1, 3:4, 4:3, 2:3, 3:2, 9:16, 16:9, 5:4, 4:5, 21:9.
 
+<!-- auto-edit:model m=nano-banana-pro -->
+<!-- /auto-edit:model -->
+
 **Soul 2.0 / Soul Cinema pool**: 10,000 free gens/month on Creator. Not credits. Resets — reset cadence unconfirmed.
 
 ## Video models — by URL slug
@@ -89,6 +92,15 @@ All reached via `/ai/video?model=<slug>`. Shared UI: **left-sidebar composer** (
 | Seedance 1.5 Pro | `seedance_pro` | — | — | 28-49 | Older; cheaper than 2.0 |
 | Higgsfield DoP | (nav only) | 3.4s (81 frames) | — | — | VFX and camera control |
 
+<!-- auto-edit:model m=kling-3.0 -->
+<!-- /auto-edit:model -->
+
+<!-- auto-edit:model m=kling-2.5-turbo -->
+<!-- /auto-edit:model -->
+
+<!-- auto-edit:model m=seedance-2.0 -->
+<!-- /auto-edit:model -->
+
 ## 365 Unlimited roster (from /me/settings/subscription, 2026-04-21)
 
 **15 image models always free** via 365-Unlimited auto-renewing:
@@ -115,6 +127,10 @@ All reached via `/ai/video?model=<slug>`. Shared UI: **left-sidebar composer** (
 Top-nav "Audio" opens a hover menu with two columns: **Features** (Voiceover / Change Voice / Translation) and **Models** (listed below).
 
 - **Eleven v3 — DEFAULT for VO / narration.** Expressive AI voice with emotion control. Use this when the user asks for a voiceover and hasn't specified a model.
+
+<!-- auto-edit:model m=eleven-v3 -->
+<!-- /auto-edit:model -->
+
 - **MiniMax Speech 2.8 HD** — Studio-quality TTS (alternative to Eleven v3 if the user wants a different timbre).
 - **Seed Speech** [NEW] — ByteDance multilingual TTS.
 - **VibeVoice** — Long-form expressive voice synthesis.
