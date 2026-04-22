@@ -65,6 +65,24 @@ If check passes → log `[x]`, move on. If fails → attempt 2 with tightened pr
 
 When natural-language intent is ambiguous, ask the user conversationally before dispatching.
 
+### Setting up Mode D (one-time)
+When the user says "Set up the Higgsfield scheduler" (or similar), invoke:
+
+```
+CronCreate(
+  schedule: "*/15 * * * *",
+  prompt: "higgsfield scheduler sweep"
+)
+```
+
+When that cron fires, Claude Code runs the "scheduler sweep" procedure:
+1. `bash ~/.claude/skills/higgsfield/engine/preflight.sh`
+2. `DUE=$(bash ~/.claude/skills/higgsfield/engine/sweep.sh)`
+3. If `$DUE` is empty → exit.
+4. If `$DUE` is a slug → run the Orchestrator playbook (Mode A) on that slug.
+
+The user can manage the cron via `CronList` / `CronDelete` (builtin tools).
+
 ### Pause / resume via the note (exit-cleanly)
 - **Pause**: append `### Q: <question>` under `## Questions`, set `status: paused`, `browser_close`, print a clear instruction to the user, exit the current orchestration. Do NOT poll.
 - **Resume**: user adds `### A: <answer>` below the most recent `### Q:`, optionally edits other parts of the note, then re-invokes `run <slug>`. Intake detects `status: paused` + presence of `### A:`, clears back to `active`, continues from the point of pause.
