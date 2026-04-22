@@ -20,6 +20,55 @@ User is on the **Creator plan**: 24-month term at $5,976, 6,000 credits/month, r
 
 During execution, if anything becomes ambiguous — a content-policy stall, a model switch, an unclear prompt — **stop and ask**, don't guess your way through.
 
+## Engine mode (agentic execution via Obsidian project notes)
+
+When asked to **run a project** (by slug, or "run the inbox", or "run X and Y in parallel", or a scheduler sweep), enter engine mode. The authoritative contract is in `docs/2026-04-22-agentic-obsidian-engine-design.md`. This section is the execution playbook.
+
+### Intake rules
+- The project note lives at `~/Obsidian/Higgsfield/Projects/<slug>.md`. The `status` frontmatter field is the lifecycle switch.
+- Only edit the note inside `<!-- engine:begin -->`…`<!-- engine:end -->`, `## Questions`, `## Outputs`, `## Auto-edits made during this run`, and the `status`/`shots` frontmatter fields.
+- Before starting, read `git log --oneline -20` inside `~/.claude/skills/higgsfield/` and scan for recently-learned traps/workflows that might apply to this project.
+
+### Phase sequence
+1. **Intake** — parse frontmatter (`python -c "import sys,yaml; ..."`), validate required fields, set `status: active`, append start line to execution log.
+2. **VO** (if `vo.script` present) — navigate to `/audio`, set model + voice + script in composer. **Read the waveform's mm:ss label from the DOM before clicking Generate** — this gives a duration estimate to plan against. Click Generate. Download the mp3 to `~/Higgsfield-out/<slug>/vo.mp3`. Run `engine/probe_duration.sh` to get the actual duration.
+3. **Plan** — if `shots:` is empty in frontmatter, plan N shots + M transitions to fit the VO duration (or the explicit `duration:`). Write the plan into `shots:` frontmatter. If script has ambiguous beat count vs. target shot count, pause: append `### Q: <question>` under `## Questions`, set `status: paused`, return control to the user.
+4. **Images** — lazy-spawn up to min(N, 6) worker tabs on `/ai/image?model=nano-banana-pro`. Each submits one shot image. Download + QC-loop each (§ QC loop below).
+5. **Videos** — lazy-spawn up to min(N, 6) workers on `/ai/video` with Kling 3.0 selected. Each submits one shot animation. Download + QC-loop.
+6. **Transitions** — for each seamless pair, run `engine/extract_frames.sh <shotA> <shotB> <tmp-dir>`, then submit a Kling 3.0 Start+End-frame job with duration=3s (see [W11](references/workflows.md) and trap #21 for the commit mechanism).
+7. **Stitch** — build a manifest JSON from the clips+transitions+VO, call `engine/stitch.sh manifest.json`.
+8. **Finalize** — set `status: done` (or `partial` if any artifact failed), fill `## Outputs` with wiki-links, archive the verbose run log to `~/Obsidian/Higgsfield/_runs/<timestamp>-<slug>.md`.
+
+### Tab allocation (lazy-spawn, reuse across phases)
+- `main` — driver's primary. Not a composer.
+- `audio` — pinned to `/audio` during Phase 2.
+- `monitor` — pinned to `/asset/video` for polling results.
+- `workers` — 1..6 Kling 3.0 composer tabs, spawned only as needed by Phase 4/5/6.
+
+Cap on worker tabs is 6 regardless of shot count. If shot count > 6, batch submissions in waves of 6.
+
+### QC loop (per artifact, max 3 attempts)
+After each artifact downloads, run a vision check:
+- **Image**: Read the PNG; compare top-priority prompt elements (head nouns, color-grade cues).
+- **Video**: Read first/mid/last frames as images; compare to source image + implied motion.
+- **Transition**: Read transition's first frame vs. clip-A's last frame, AND transition's last frame vs. clip-B's first frame; check continuity.
+
+If check passes → log `[x]`, move on. If fails → attempt 2 with tightened prompt (keep intent, add missing elements, add anti-prompts like "no flash"); attempt 3 with simplified prompt. After 3 failures:
+- Spec ambiguity → pause with `### Q:`.
+- Technical quality → log `[!]`, keep best-ranked attempt, continue.
+
+### Mode dispatch
+- One slug name → Mode A: single project.
+- "run the inbox" → Mode B: all `status: inbox` projects, sequential.
+- Multiple slugs → Mode C: up to 3 in parallel, shared worker pool.
+- "scheduler sweep" (cron-triggered or manual) → Mode D: iterate `status: scheduled` projects whose `schedule:` next-run has passed.
+
+When natural-language intent is ambiguous, ask the user conversationally before dispatching.
+
+### Pause / resume via the note
+- Pause: append `### Q: <question>` under `## Questions`, set `status: paused`, stop.
+- Resume: user adds `### A: <answer>` below the Q. In Mode A/C, the engine polls the note's mtime every 30s while paused (up to 30 minutes). In Mode D, the next cron sweep picks up any `A:`-populated Paused projects.
+
 ## Current model availability (this session)
 
 - **Kling 2.5 Turbo is OFF-LIMITS when driven from Claude Code** — Generate clicks silently drop (no error, no "Generating" indicator, no queued job). Unknown cause. Use **Kling 3.0** instead. User will explicitly re-enable Kling 2.5 Turbo when it's fixed.
