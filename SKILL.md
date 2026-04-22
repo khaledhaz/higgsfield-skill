@@ -65,9 +65,10 @@ If check passes → log `[x]`, move on. If fails → attempt 2 with tightened pr
 
 When natural-language intent is ambiguous, ask the user conversationally before dispatching.
 
-### Pause / resume via the note
-- Pause: append `### Q: <question>` under `## Questions`, set `status: paused`, stop.
-- Resume: user adds `### A: <answer>` below the Q. In Mode A/C, the engine polls the note's mtime every 30s while paused (up to 30 minutes). In Mode D, the next cron sweep picks up any `A:`-populated Paused projects.
+### Pause / resume via the note (exit-cleanly)
+- **Pause**: append `### Q: <question>` under `## Questions`, set `status: paused`, `browser_close`, print a clear instruction to the user, exit the current orchestration. Do NOT poll.
+- **Resume**: user adds `### A: <answer>` below the most recent `### Q:`, optionally edits other parts of the note, then re-invokes `run <slug>`. Intake detects `status: paused` + presence of `### A:`, clears back to `active`, continues from the point of pause.
+- **Mode D cron**: does NOT auto-resume paused projects. User must flip `status: scheduled` (or `inbox`) manually after answering. This is intentional — avoids re-running projects whose question wasn't actually answered.
 
 ## Orchestrator playbook (Mode A runtime)
 
