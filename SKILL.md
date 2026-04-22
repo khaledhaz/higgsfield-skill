@@ -69,6 +69,126 @@ When natural-language intent is ambiguous, ask the user conversationally before 
 - Pause: append `### Q: <question>` under `## Questions`, set `status: paused`, stop.
 - Resume: user adds `### A: <answer>` below the Q. In Mode A/C, the engine polls the note's mtime every 30s while paused (up to 30 minutes). In Mode D, the next cron sweep picks up any `A:`-populated Paused projects.
 
+## Orchestrator playbook (Mode A runtime)
+
+This is the concrete procedure Claude executes when told "run <slug>" (or when a scheduler sweep emits a slug). Follow these steps in order. Each step is one action.
+
+### Pre-flight
+1. `bash ~/.claude/skills/higgsfield/engine/preflight.sh` — cleans stale SingletonLock (trap #20).
+2. `cd ~/.claude/skills/higgsfield && git log --oneline -20` — include recently-learned auto-edits in your working context.
+
+### Phase 0 — Intake
+1. Resolve slug: `NOTE=~/Obsidian/Higgsfield/Projects/<slug>.md`.
+2. Parse frontmatter: `python3 ~/.claude/skills/higgsfield/engine/parse_frontmatter.py "$NOTE"`.
+3. Branch on `status`:
+   - `inbox` → proceed.
+   - `active` → crash detected. Read execution log; find the last line with `[x]`; resume from the first non-done phase. If no `[x]` lines exist, start from Phase 0.
+   - `paused` → read `## Questions` section; if a `### A:` answer follows the last `### Q:`, proceed (treat the answer as current-turn input). Otherwise exit with a message.
+   - `done` / `failed` → refuse (explain how to restart).
+   - `scheduled` → refuse (wait for cron).
+4. Flip status: `python3 ~/.claude/skills/higgsfield/engine/update_status.py "$NOTE" active`.
+5. Create output dir: `mkdir -p ~/Higgsfield-out/<slug>`.
+6. Append to log: `[x] <ISO-timestamp> Phase 0 intake: status=active, output=<dir>`.
+
+### Phase 1 — VO (skip if `vo` is null)
+1. `browser_navigate` to `/audio`.
+2. Set Voiceover use-case, model = `vo.model` (default `eleven-v3`), voice = `vo.voice`, paste `vo.script`.
+3. Read waveform `mm:ss` estimate from DOM (pre-gen).
+4. Click Generate.
+5. Wait until audio is ready; extract MP3 CDN URL.
+6. `curl -sL -o ~/Higgsfield-out/<slug>/vo.mp3 <url>`.
+7. `ACTUAL=$(bash ~/.claude/skills/higgsfield/engine/probe_duration.sh ~/Higgsfield-out/<slug>/vo.mp3)`.
+8. If `|actual - estimate| > 0.5`, log the drift.
+9. Append to log: `[x] Phase 1 VO ✅ · <model>/<voice> · <actual>s · <cost>cr`.
+
+### Phase 2 — Plan
+1. If `shots:` frontmatter is non-empty → skip (respect pre-populated plan).
+2. Otherwise, plan N shots to fit the VO duration (default 5s shots) + M transitions per `transitions.mode`.
+3. If shot-count ambiguity detected:
+   - Append `### Q: <question>` under `## Questions`.
+   - `python3 ... update_status.py "$NOTE" paused`.
+   - Append to log and exit with a message.
+4. Write the plan back into `shots:` frontmatter (edit the note file).
+5. Append to log: `[x] Phase 2 plan: N shots + M transitions, total Ns`.
+
+### Phase 3 — Images (parallel)
+1. Worker count = `min(len(shots), 6)`.
+2. For each shot, in turn (sequential driver):
+   - `browser_tabs action=new` → tab on `/ai/image?model=nano-banana-pro`.
+   - Via `browser_evaluate`: clear leftover state, set aspect=frontmatter `aspect`, resolution=`2K`, batch=1, **verify Unlimited toggle ON** (trap #22).
+   - Type shot prompt.
+   - Click Generate; verify new history row appeared.
+3. Wait for all N jobs to complete (poll history rows for CDN URLs).
+4. Fan out downloads using parallel `Agent` subagents (up to 6 in one message) — see "Subagent dispatch patterns" below.
+5. Fan out vision QC using parallel `Agent` subagents (one per shot).
+6. On QC FAIL → retry up to 3 attempts per shot (tighten prompt → re-submit → re-QC).
+7. Log per shot: `[x] Phase 3 shot <n> image ✅ (attempt <k>) · ...`.
+
+### Phase 4 — Videos (parallel, Kling 3.0)
+Same shape as Phase 3, but:
+- Tabs on Kling 3.0 video composer.
+- Upload each shot's PNG to Start frame.
+- Set duration per shot via the hidden `<input type="range">` helper (trap #21).
+- Type motion prompt.
+- Generate → download → QC-loop (vision-check first/mid/last frame against source image + implied motion).
+
+### Phase 5 — Transitions (parallel, only if `transitions.seamless_pairs`)
+1. For each pair `(A, B)`, fan out frame extraction: `Agent` → `bash .../extract_frames.sh shotA.mp4 shotB.mp4 /tmp/t-<i>/`.
+2. For each extracted pair, dispatch a Kling 3.0 Start+End-frame job (duration 3s, Hollywood pattern from W11).
+3. Download + QC each transition.
+
+### Phase 6 — Stitch
+1. Build `manifest.json` in-context (Claude writes JSON). Schema from parent spec §12 App D.
+2. `bash ~/.claude/skills/higgsfield/engine/stitch.sh ~/Higgsfield-out/<slug>/manifest.json`.
+3. Verify final MP4 exists and duration is within tolerance of planned total.
+4. Log: `[x] Phase 6 stitch ✅ · final <s>s · <MB>`.
+
+### Phase 7 — Finalize
+1. Any `[!]` in log → `partial`; otherwise → `done`. `python3 ... update_status.py "$NOTE" <final>`.
+2. Fill `## Outputs` section with wiki-links to shot PNGs, shot MP4s, transitions, final MP4.
+3. Archive verbose run log: `cp $NOTE ~/Obsidian/Higgsfield/_runs/<slug>-<timestamp>.md`.
+4. If any auto-edits landed during the run, append commit hashes + summaries to `## Auto-edits made during this run`.
+5. `browser_close` — free Chrome.
+6. Print completion summary.
+
+### Subagent dispatch patterns
+
+Use parallel `Agent` subagents for LOCAL work only (they cannot safely share the browser). Cap fan-out at 6 per batch. Prefer model=`haiku` for mechanical work.
+
+**Batch download** (after all N video CDN URLs are known):
+```
+Agent(description="Download shots 1-3", model="haiku",
+      subagent_type="general-purpose",
+      prompt="Run: curl -sL <url1> -o shot1.mp4; curl -sL <url2> -o shot2.mp4; curl -sL <url3> -o shot3.mp4. Report downloaded filenames + sizes.")
+Agent(description="Download shots 4-6", model="haiku", ...)
+```
+Two dispatches in one message → parallel.
+
+**Vision QC fan-out** (after all downloads):
+```
+Agent(description="QC shot 1", model="haiku",
+      subagent_type="general-purpose",
+      prompt="Read ~/Higgsfield-out/<slug>/shot1.png. Prompt was: <prompt>. Check ≥4 of these elements are visible: <top-5 head-nouns + color-grade cues>. Report {status: PASS|FAIL, missing: [...], suggested_retry_prompt: <text if FAIL>}.")
+# ... one per shot, up to 6 parallel
+```
+
+**Frame extraction fan-out** (Phase 5 prep):
+```
+Agent(description="Extract frames for transitions 1-2", model="haiku",
+      subagent_type="general-purpose",
+      prompt="Run: bash ~/.claude/skills/higgsfield/engine/extract_frames.sh shot1.mp4 shot2.mp4 /tmp/t1/; bash ... shot2.mp4 shot3.mp4 /tmp/t2/. Report OK/ERR per extraction.")
+```
+
+### Browser lifecycle
+- Pre-flight `preflight.sh` at run start.
+- Keep browser alive across phases of the same project.
+- `browser_close` at the end of every project (done, partial, failed, or paused).
+
+### Pause / resume (exit-cleanly semantics)
+- When a phase detects spec ambiguity → write `### Q:` block → `update_status.py paused` → `browser_close` → print a clear instruction ("Pause on <reason>. Answer with `### A:` in the Questions section of `<note>`, then re-invoke 'run <slug>'") → exit the current orchestration.
+- The session does NOT poll the note for an answer. User re-invokes when ready.
+- Mode D cron sweeps skip paused projects until their `### A:` has been added AND status has been manually flipped back to `scheduled` (user's deliberate action — the cron does not auto-resume paused projects).
+
 ## Self-learning rules (skill auto-edit)
 
 During engine-mode runs, when you discover a new fact about Higgsfield's behavior (UI quirk, prompt pattern, content-policy rule, model parameter), write it back into the skill so the next run handles it natively.
