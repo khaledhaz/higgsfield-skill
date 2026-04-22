@@ -22,6 +22,9 @@ Credits you BUY (not plan-included monthly credits) die after 90 days per the Bu
 ### 6. Minimax End Frame forces 768p+ resolution
 A tooltip says "Minimax Start & End Frame is available only when using 768p-1080p quality." So adding an End frame bumps you off any lower (cheaper) tier.
 
+<!-- auto-edit:traps category=cost -->
+<!-- /auto-edit:traps -->
+
 ## Session-state traps (these waste gens on wrong inputs)
 
 ### 7. Session state persists across video-model navigations
@@ -35,6 +38,9 @@ The image page's Lexical editor reads from `hf:image-form-upd.prompt` on mount. 
 
 ### 10. Paste events in Lexical editors APPEND, don't replace
 `dispatchEvent(new ClipboardEvent('paste'))` inserts at cursor position. If the textbox has old content, you'll get concatenation. **Clear first**: `document.execCommand('selectAll'); document.execCommand('delete');` then paste.
+
+<!-- auto-edit:traps category=session-state -->
+<!-- /auto-edit:traps -->
 
 ## UI discovery traps (these waste time hunting)
 
@@ -53,6 +59,9 @@ Image thumbnails open a detail overlay on click. Video thumbnails often require 
 ### 15. `Animate` button on image detail often closes the panel instead of forwarding
 Reported behavior inconsistent. If Animate doesn't pre-load the image on the video page, do it manually: drag-drop the image URL or write `flow-create-video-*.inputImage` with the asset UUID.
 
+<!-- auto-edit:traps category=ui-discovery -->
+<!-- /auto-edit:traps -->
+
 ## Submission traps (these silently drop your work)
 
 ### 18. Kling 2.5 Turbo Generate clicks silently drop from Claude Code (as of 2026-04-21)
@@ -62,6 +71,9 @@ When Kling 2.5 Turbo is driven through Claude Code (Playwright / JS click), the 
 
 **If the user asks for Kling 2.5 Turbo anyway**: tell them about this issue and confirm they want to try — don't silently substitute.
 
+<!-- auto-edit:traps category=submission -->
+<!-- /auto-edit:traps -->
+
 ## Eligibility & moderation traps (these stall indefinitely)
 
 ### 19. Seedance 2.0 content-eligibility check can stall on sensitive imagery
@@ -70,6 +82,9 @@ The "Checking content…" state on input images for Seedance 2.0 / Seedance Pro 
 **Workaround**: wait 90 seconds. If still checking, **reload the full page**, re-open the picker, re-select the image. Loop up to ~5 cycles. If still unresolved, stop and ask the user — do not swap models silently, and do not skip the check.
 
 **Never bypass**: eligibility is a moderation rail. If an image comes back "Not eligible", stop and surface it to the user with the specific image that failed.
+
+<!-- auto-edit:traps category=eligibility -->
+<!-- /auto-edit:traps -->
 
 ## UI-commit traps (values appear set but don't stick)
 
@@ -96,6 +111,9 @@ After that, close the popup (click the Duration pill again or click the prompt t
 
 **Pricing**: ~1.75 credits per second of Kling 3.0 output. 3s = ✨5.25 credits, 5s = ✨8.75, 10s = ✨17.5. Check the Generate button label to confirm the new duration committed (if it dropped from 8.75 to 5.25, you're at 3s).
 
+<!-- auto-edit:traps category=ui-commit -->
+<!-- /auto-edit:traps -->
+
 ## Browser-automation traps (Claude Code / Playwright-specific)
 
 ### 20. Playwright MCP browser can deadlock on SingletonLock after long sessions
@@ -111,6 +129,9 @@ Then call `browser_navigate` again — it'll spawn fresh. Higgsfield cookies per
 
 **When to pre-empt**: if you're about to drive multiple generations in a row (>6), consider a proactive restart between phases — cheaper than recovering mid-task.
 
+<!-- auto-edit:traps category=browser-automation -->
+<!-- /auto-edit:traps -->
+
 ## Label/naming traps (these confuse reproducibility)
 
 ### 16. Model names are inconsistent across surfaces
@@ -123,6 +144,9 @@ Most video models default Enhance=ON. Your typed prompt is server-side expanded 
 - For reproducibility: turn Enhance OFF or note the enhanced text from detail view.
 - For quality: leave it ON — the enhancer is genuinely good.
 - `Recreate` preserves the ENHANCED text, which is useful context.
+
+<!-- auto-edit:traps category=label-naming -->
+<!-- /auto-edit:traps -->
 
 ## Red flags that mean "stop and check"
 
