@@ -21,8 +21,11 @@ A "beat" in beats.json:
   }
 """
 import json
+import os
 import re
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 try:
@@ -162,11 +165,6 @@ def align(whisper_segments: list, script_text: str, beat_splits: list = None) ->
     for i, b in enumerate(beats, start=1):
         b["id"] = i
     return beats
-
-
-import os
-import tempfile
-import time
 
 
 def run_whisper(audio_path: Path, model_name: str = "medium") -> list:
