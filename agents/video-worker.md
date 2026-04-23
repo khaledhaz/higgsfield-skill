@@ -25,8 +25,18 @@ You are one of three parallel video-workers. You OWN a Chrome tab and operate ON
    Object.keys(localStorage).find(k => k.startsWith('flow-create-video-'))
    ```
    Call this `FORM_KEY`. If not present, navigate the form once manually to seed it.
-4. Verify Kling 3.0 is already selected (`data-component="model"` button shows "Kling 3.0"). If not, click-to-switch using the dialog (see previous skill version), then reload to bake the model choice into `FORM_KEY.modelVersion = "kling3_0"`.
-5. Verify `hf:video-kling-3-store:v2.duration === 6`. If not, set duration via the hidden `input[type=range]` slider (trap #21) and verify.
+4. Verify Kling 3.0 is already selected (`data-component="model"` button shows "Kling 3.0"). If not, click-to-switch using the dialog, then reload to bake `FORM_KEY.modelVersion = "kling3_0"`.
+5. Set duration to the target value (default 6s) via the Kling 3.0 store (per trap #21 — this is the reliable path, NOT the slider):
+   ```js
+   () => {
+     const key = 'hf:video-kling-3-store:v2';
+     const cur = JSON.parse(localStorage.getItem(key) || '{}');
+     cur.duration = 6;   // any integer 3..15
+     localStorage.setItem(key, JSON.stringify(cur));
+     return cur.duration;
+   }
+   ```
+   You can set this AT THE SAME TIME as the per-shot priming in step 3 below (same reload applies both). Verify after reload that the Generate button shows the expected cost (1.75 × duration — e.g., 6s → 10.5, 10s → 17.5, 15s → 26.25).
 
 ## Per shot — FAST PATH (localStorage priming)
 
@@ -36,17 +46,26 @@ For each `shot_id` in SHOT_IDS:
 
 1. Load the shot and verify `status.video == "queued"` and `status.image == "pass"`. Read its `video_prompt` and `artifacts.image_asset_id` (the Higgsfield asset UUID for the NBP output — for NBP this equals the UUID component of the `hf_<ts>_<uuid>_min.webp` filename).
 2. `browser_tabs` action=select, index=$TAB_INDEX.
-3. Prime localStorage + reload:
+3. Prime BOTH localStorage stores + reload (atomic):
    ```js
    (args) => {
-     const key = Object.keys(localStorage).find(k => k.startsWith('flow-create-video-'));
-     const cur = JSON.parse(localStorage.getItem(key) || '{}');
-     cur.prompt = args.video_prompt;
-     cur.inputImage = args.image_asset_id;
-     cur.endImage = null;                   // Kling 3.0 is prompt-driven, not morph-interpolating
-     cur.modelVersion = 'kling3_0';
-     localStorage.setItem(key, JSON.stringify(cur));
-     return key;
+     // Master form state (prompt + input image + model)
+     const formKey = Object.keys(localStorage).find(k => k.startsWith('flow-create-video-'));
+     const form = JSON.parse(localStorage.getItem(formKey) || '{}');
+     form.prompt = args.video_prompt;
+     form.inputImage = args.image_asset_id;
+     form.endImage = null;                  // Kling 3.0 is prompt-driven, not morph-interpolating
+     form.modelVersion = 'kling3_0';
+     localStorage.setItem(formKey, JSON.stringify(form));
+
+     // Kling 3.0 store (duration + aspect + mode)
+     const klingKey = 'hf:video-kling-3-store:v2';
+     const kling = JSON.parse(localStorage.getItem(klingKey) || '{}');
+     kling.duration = args.duration || 6;   // 3..15 per trap #21
+     kling.aspectRatio = args.aspect_ratio || '16:9';
+     localStorage.setItem(klingKey, JSON.stringify(kling));
+
+     return { formKey, duration: kling.duration };
    }
    ```
    Then `browser_navigate` to `https://higgsfield.ai/ai/video` (reload loads the primed state).

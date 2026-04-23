@@ -97,28 +97,35 @@ The "Checking content…" state on input images for Seedance 2.0 / Seedance Pro 
 
 ## UI-commit traps (values appear set but don't stick)
 
-### 21. Kling 3.0 duration slider — use the hidden `<input type=range>`, not role="slider"
+### 21. Kling 3.0 duration — use the localStorage store, NOT the slider
 
-**Major trap.** The "Choose duration" popup contains an outer element with `role="slider"` that looks like the control — **it is not**. That element is a React-aria group wrapper. The real control is a hidden `<input type="range" min="3" max="15" step="1">` inside the popup.
+**Updated 2026-04-23 after live validation at 3/6/10/15 values.** The slider path (hidden `<input type="range">` + HTMLInputElement value setter + input/change events) works sometimes but is **flaky**: the Duration popup must be open first (slider isn't in the DOM otherwise), and React rehydrates from store state on subsequent renders so a slider-only change can silently revert.
 
-**What actually works** (React-compatible):
+**What actually works, reliably, every time:**
+
 ```js
-const input = document.querySelector('input[type="range"][min="3"]');
-const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-setter.call(input, '3');
-input.dispatchEvent(new Event('input', { bubbles: true }));
-input.dispatchEvent(new Event('change', { bubbles: true }));
+// 1. Write duration into the Kling 3.0 store
+const key = 'hf:video-kling-3-store:v2';
+const cur = JSON.parse(localStorage.getItem(key) || '{}');
+cur.duration = 6;   // any integer 3..15
+localStorage.setItem(key, JSON.stringify(cur));
+
+// 2. Reload the page (or navigate back to /ai/video)
+// location.reload()   // or browser_navigate to the same URL
 ```
-After that, close the popup (click the Duration pill again or click the prompt textbox). Verify the pill on the bar now reads `3s`.
 
-**What does NOT work reliably:**
-- `[role="slider"]`-focused ArrowLeft/ArrowRight: updates `aria-valuenow` visually but doesn't propagate to React form state. The Duration pill on the bar stays at the old value, and the gen runs at the OLD duration.
-- Pressing `Escape` to close: reverts the visible slider.
-- Click-outside via a synthetic click on the prompt textbox alone: sometimes commits, often doesn't — unreliable.
+After reload, the Duration pill, the store, and the Generate button cost all reflect the new value in one consistent state. Validated at 3s (Generate 5.25), 6s (Generate 10.5), 10s (Generate 17.5), 15s (Generate 26.25) — Kling 3.0 pricing is 1.75 credits/second.
 
-**Range fact**: Kling 3.0 duration is **3s minimum to 15s maximum**, in 1s steps — 5s is just the default, not the minimum. (The outer red-herring slider reports max=5 because it's actually the Assets-panel gallery zoom slider.)
+**When you're already reloading anyway** (e.g., the video-worker priming flow, which reloads per shot to bind `flow-create-video-*.inputImage` + `.prompt`), adding `cur.duration` to the same localStorage write costs literally nothing — set both stores in the same step.
 
-**Pricing**: ~1.75 credits per second of Kling 3.0 output. 3s = ✨5.25 credits, 5s = ✨8.75, 10s = ✨17.5. Check the Generate button label to confirm the new duration committed (if it dropped from 8.75 to 5.25, you're at 3s).
+**What does NOT work reliably** (slider-only path, kept here as a last-resort fallback):
+- `input[type="range"]` value setter + input/change events **without a reload**: updates the store in-memory but React's next render re-reads the store and sometimes keeps the new value, sometimes doesn't.
+- `[role="slider"]` ArrowLeft/ArrowRight: updates `aria-valuenow` visually but doesn't propagate to React form state at all.
+- `Escape` to close the popup: reverts the visible slider.
+
+**Range**: 3s minimum to 15s maximum, 1s steps. Default is 5s. (The `role="slider"` element you'll sometimes find at max=5 is the Assets-panel gallery zoom slider, not the duration control.)
+
+**Pricing**: 1.75 credits per second. Always cross-check the Generate button label after reload — it's the single source of truth that the duration change committed.
 
 <!-- auto-edit:traps category=ui-commit -->
 <!-- /auto-edit:traps -->
