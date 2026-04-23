@@ -11,9 +11,13 @@ You are the strict visual reviewer. Your job is to verify that a rendered image 
 
 ## Two modes
 
-### Mode BATCH (preferred — used for initial review of all N images)
+### Mode SINGLE (default under the pipelined orchestrator)
 
-Reviews every image in a single dispatch. The orchestrator uses this by default — one subagent dispatch for the whole phase instead of N sequential ones. Saves ~1s per image of context-build overhead.
+The pipelined Phase 4+5 orchestrator dispatches you in SINGLE mode as soon as ONE image completes rendering. Multiple SINGLE dispatches may be in flight concurrently — that's fine, each dispatch is scoped to its own `(shot_id, role)` and you only read/mutate that one image's state. No shared state between concurrent SINGLE dispatches. Each dispatch returns in ~2s, so stream review adds no meaningful latency to the pipeline.
+
+### Mode BATCH (still available for small-batch or tight-timing review)
+
+Reviews every image in a single dispatch. The orchestrator may use this when all images happen to render within ~5s of each other (tight batch where stream review would over-dispatch). For typical runs with retries, stream SINGLE mode is preferred.
 
 **Inputs:**
 - `OUTPUT_DIR`

@@ -6,6 +6,12 @@ Subcommands:
   update <path> <shot_id> <field=value>...   # supports dot-paths like status.image=pass
   add_review <path> <shot_id> <stage> <verdict> <reason>
   next_queued <path> <stage>                  # prints shot_id or empty
+  next_video_ready <path> <worker_tag>        # atomically claims the lowest-id shot whose
+                                              #   video.status == "queued" AND all required
+                                              #   image roles have status == "pass".
+                                              #   Marks video.status = "claimed_<worker_tag>"
+                                              #   and prints the shot id. Prints nothing if
+                                              #   no shot is ready.
   attempts <path> <shot_id> <stage>           # prints current attempt count
   mark_attempt <path> <shot_id> <stage>       # increments attempts.<stage>
   get <path> <shot_id> [<dot-path>]           # prints field value or whole shot JSON
@@ -126,6 +132,39 @@ def cmd_next_queued(path: Path, stage: str) -> int:
     return 0
 
 
+def cmd_next_video_ready(path: Path, worker_tag: str) -> int:
+    """Atomically find the lowest-id shot whose video can be submitted NOW.
+
+    A shot is 'video-ready' iff:
+      - video.status == "queued"
+      - images.start.status == "pass"
+      - if technique == "start_end": images.end.status == "pass"
+
+    On match, atomically set video.status = f"claimed_{worker_tag}" and print the shot id.
+    On no match, print nothing (exit 0).
+    """
+    shots = _load(path)
+    for s in sorted(shots, key=lambda x: int(x["id"])):
+        video_status = s.get("video", {}).get("status", "queued")
+        if video_status != "queued":
+            continue
+        images = s.get("images", {}) or {}
+        start_img = images.get("start") or {}
+        if start_img.get("status") != "pass":
+            continue
+        if s.get("technique") == "start_end":
+            end_img = images.get("end") or {}
+            if end_img.get("status") != "pass":
+                continue
+        # Claim atomically
+        s.setdefault("video", {})["status"] = f"claimed_{worker_tag}"
+        _save(path, shots)
+        print(s["id"])
+        return 0
+    # No ready shot; print nothing
+    return 0
+
+
 def cmd_attempts(path: Path, shot_id: int, stage: str) -> int:
     shots = _load(path)
     shot = _find(shots, shot_id)
@@ -172,6 +211,8 @@ def main() -> int:
             return cmd_add_review(path, int(argv[2]), argv[3], argv[4], argv[5])
         if cmd == "next_queued":
             return cmd_next_queued(path, argv[2])
+        if cmd == "next_video_ready":
+            return cmd_next_video_ready(path, argv[2])
         if cmd == "attempts":
             return cmd_attempts(path, int(argv[2]), argv[3])
         if cmd == "mark_attempt":

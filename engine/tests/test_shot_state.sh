@@ -97,4 +97,39 @@ echo "PASS test_shot_state clean-error-on-corruption"
 # Restore reviews to a dict so later test iterations don't break (in case this file is re-run)
 python3 -c "import json; d=json.load(open('$SF')); d[0]['reviews']={'image':[],'video':[]}; open('$SF','w').write(json.dumps(d))"
 
+# Case 13: next_video_ready — atomically claim lowest-id shot whose video is queued and all image roles passed
+SF2="$FIX_DIR/shots_vr.json"
+cat > "$SF2" <<'EOF'
+[
+  {"id": 1, "technique": "start_only", "images": {"start": {"status": "pass"}}, "video": {"status": "queued"}},
+  {"id": 2, "technique": "start_end",  "images": {"start": {"status": "pass"}, "end": {"status": "rendered"}}, "video": {"status": "queued"}},
+  {"id": 3, "technique": "start_only", "images": {"start": {"status": "pass"}}, "video": {"status": "queued"}},
+  {"id": 4, "technique": "start_end",  "images": {"start": {"status": "pass"}, "end": {"status": "pass"}},     "video": {"status": "queued"}}
+]
+EOF
+
+# First claim: should be shot 1 (lowest-id ready)
+c=$(python3 "$SS" next_video_ready "$SF2" A)
+[ "$c" = "1" ] || { echo "FAIL: next_video_ready first: got '$c' (expected 1)"; exit 1; }
+claimed=$(python3 "$SS" get "$SF2" 1 video.status)
+[ "$claimed" = "claimed_A" ] || { echo "FAIL: first claim did not set status: got '$claimed'"; exit 1; }
+echo "PASS test_shot_state next-video-ready-claims-lowest"
+
+# Second claim from a different worker: should skip shot 1 (no longer queued) and shot 2 (end not pass) → shot 3
+c=$(python3 "$SS" next_video_ready "$SF2" B)
+[ "$c" = "3" ] || { echo "FAIL: next_video_ready second: got '$c' (expected 3)"; exit 1; }
+claimed=$(python3 "$SS" get "$SF2" 3 video.status)
+[ "$claimed" = "claimed_B" ] || { echo "FAIL: second claim status: got '$claimed'"; exit 1; }
+echo "PASS test_shot_state next-video-ready-skips-ineligible"
+
+# Third claim: shot 4 (the start_end with both images passed)
+c=$(python3 "$SS" next_video_ready "$SF2" C)
+[ "$c" = "4" ] || { echo "FAIL: next_video_ready third: got '$c' (expected 4)"; exit 1; }
+echo "PASS test_shot_state next-video-ready-start-end-ok"
+
+# Fourth claim: none available (1,3,4 claimed, 2 still blocked on images.end)
+c=$(python3 "$SS" next_video_ready "$SF2" D)
+[ -z "$c" ] || { echo "FAIL: next_video_ready when none ready: got '$c' (expected empty)"; exit 1; }
+echo "PASS test_shot_state next-video-ready-none"
+
 echo "ALL PASSED: shot_state"

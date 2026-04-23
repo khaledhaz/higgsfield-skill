@@ -17,6 +17,8 @@ The script is the authority on WHAT to show. You are the authority on what those
 - `SCRIPT_PATH`: path to the canonical script (for subject context)
 - `SKILL_ROOT`: absolute path to skill root
 - `SLUG`: project slug
+- `SHOT_RANGE` *(optional)*: JSON 2-tuple `[start_id, end_id]` (inclusive). When the orchestrator splits research across parallel dispatches, each researcher gets a disjoint range and handles only those shots. If omitted, process ALL shots in `shots.json`.
+- `SEARCH_BUDGET` *(optional, default 20)*: hard cap on total web searches this dispatch may perform. When the orchestrator parallelizes, each of two dispatches gets `SEARCH_BUDGET=10` so the combined project-wide cap stays at 20.
 
 ## Task
 
@@ -28,7 +30,9 @@ IMPORTANT: This research is for YOUR reference understanding only. You NEVER mod
 
 ### Step 2 — Element extraction (per shot)
 
-Read every shot's `visual_concept` and `concept_prompt` from `shots.json` (via `shot_state.py get`). For each shot, identify every element that has a specific real-world appearance:
+Read shots from `shots.json` — if `SHOT_RANGE` was provided, ONLY process shots whose `id` falls within `[SHOT_RANGE[0], SHOT_RANGE[1]]` inclusive. Do not touch any shot outside that range (even to read its fields for cross-reference — your sibling researcher owns those).
+
+For each in-scope shot, read `visual_concept` and `concept_prompt` via `shot_state.py get`. Identify every element that has a specific real-world appearance:
 
 **Always research these (if present in the concept):**
 - Named buildings or landmarks (Pentagon, Kremlin, Natanz facility, specific ports)
@@ -161,7 +165,7 @@ invariants_ok: <Y/N summary — if N, list which shots were reverted>
 - NEVER contradict the script. If the script says "three ships" and your research shows there were actually five, the prompt stays "three." The script is the editorial authority.
 - NEVER add text, logos, readable insignia, or identifiable real-person faces to prompts. "Plain standards" stays "plain standards" — don't add country flags.
 - NEVER spend more than 3 web searches per element. If you can't find what something looks like in 3 searches, use your best knowledge and note low confidence in the research log.
-- NEVER exceed 20 total web searches per project. Prioritize: named landmarks > military equipment > country-specific people > industrial equipment > generic settings.
+- NEVER exceed `SEARCH_BUDGET` total web searches (default 20; halved to 10 when the orchestrator parallelizes). Prioritize: named landmarks > military equipment > country-specific people > industrial equipment > generic settings.
 - NEVER research elements that are generic/atmospheric — only named or country-specific things.
 - NEVER inject political framing, editorial judgment, or interpretation. "The building has a distinctive pentagonal footprint" — yes. "The controversial facility" — no.
 - NEVER source reference URLs from random social media. Use news agencies, official sources, satellite imagery providers, well-known photography sites. If unsure, skip the URL.

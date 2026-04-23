@@ -146,59 +146,99 @@ python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_i
 
 This guarantees every image in the package shares identical rendering instructions regardless of which agent wrote the concept, and that retries on individual shots never drift the package's visual identity. The image-worker concatenates `concept_prompt + ", " + style_prompt` → `prompt` at submission time.
 
-### Phase 3.7 — Visual research (dispatch `visual-researcher`)
+### Phase 3.7 — Visual research (parallel `visual-researcher` dispatches)
 
-Between style injection and image generation, dispatch the `visual-researcher` subagent to enrich every shot's `concept_prompt` with real-world physical-accuracy details. The director decided WHAT to show (composition, technique, intent). The researcher makes sure every named element in the frame LOOKS CORRECT when NBP renders it — named buildings, specific weapon systems, country-specific people/attire, industrial equipment, landmark geography.
+Between style injection and image generation, the `visual-researcher` subagent enriches every shot's `concept_prompt` with real-world physical-accuracy details. The director decided WHAT to show (composition, technique, intent). The researcher makes sure every named element in the frame LOOKS CORRECT when NBP renders it — named buildings, specific weapon systems, country-specific people/attire, industrial equipment, landmark geography.
 
-Dispatch the `visual-researcher` with `OUTPUT_DIR`, `SCRIPT_PATH`, `SKILL_ROOT`, `SLUG`. The agent reads every shot's `visual_concept` and `concept_prompt`, runs targeted web searches (max 20/project, max 3/element), and appends physical descriptors to the concept_prompt — without changing the composition, camera angle, cinematic technique, or editorial intent the director decided. For specific named landmarks/equipment/vehicles, it may also attach reference image URLs to `images.<role>.reference_urls` (JSON array) for the image-worker's optional use.
+**Parallel dispatch rule**:
+- If `len(shots) >= 4`, dispatch TWO researchers concurrently (single message, two Agent tool calls) with disjoint shot ranges:
+  - Researcher A: `SHOT_RANGE=[1, ceil(N/2)]`, `SEARCH_BUDGET=10`
+  - Researcher B: `SHOT_RANGE=[ceil(N/2)+1, N]`, `SEARCH_BUDGET=10`
+- If `len(shots) < 4`, dispatch a single researcher with no `SHOT_RANGE` and the default `SEARCH_BUDGET=20`.
 
-After DONE, the orchestrator verifies:
+Both researchers read and write the same `shots.json` — the dispatch is race-safe because each researcher only mutates shot IDs inside its assigned range, and `shot_state.py update` is atomic. Both append to the same `research_log.md` (append-only, no conflict).
+
+Each dispatch receives: `OUTPUT_DIR`, `SCRIPT_PATH`, `SKILL_ROOT`, `SLUG`, and the optional `SHOT_RANGE` + `SEARCH_BUDGET`. The agent reads each in-range shot's `visual_concept` and `concept_prompt`, runs targeted web searches (max 3/element, `SEARCH_BUDGET` total), and appends physical descriptors to the concept_prompt — without changing composition, camera angle, cinematic technique, or editorial intent. For named landmarks/equipment/vehicles, it may attach reference image URLs to `images.<role>.reference_urls` (JSON array) for the image-worker's optional use.
+
+After BOTH dispatches return DONE, the orchestrator verifies (across all shots):
 - Every `concept_prompt` is still ≤280 chars.
 - No concept_prompt gained style/palette/grain vocabulary (style-bleed guard).
 - No concept_prompt gained "no text / no logos / no flags" phrasing (that lives in `style_prompt`).
 - `$OUTPUT_DIR/research_log.md` exists with a per-(shot, role) entry for human review.
 - `visual_concept`, `cinematic_technique`, `director_intent`, `claim_summary_en`, `duration`, `technique` on every shot are unchanged (researcher never modifies director fields).
 
-If any invariant is broken, the orchestrator reverts the offending shot's `concept_prompt` to the pre-research value and logs the revert before moving on. Phase 3.7 is additive-only; a partial enrichment (some shots got enriched, others didn't) is acceptable — the enriched concept_prompt is the primary accuracy mechanism, reference URLs are a bonus.
+If any invariant is broken, the orchestrator reverts the offending shot's `concept_prompt` to the pre-research value and logs the revert before moving on. Phase 3.7 is additive-only; a partial enrichment (some shots got enriched, others didn't) is acceptable.
 
-### Phase 4 — Images (dispatch workers + BATCH reviewer)
+### Phase 4 + Phase 5 — Images and Videos (pipelined, fire-and-forget, stream review)
 
-With the director's plan in hand, the orchestrator enumerates every image task: the list of `{shot_id, role}` pairs where `role ∈ {start, end}`. For a 6-shot plan with 2 `start_end` shots, that's 6 + 2 = 8 image tasks.
+These two phases DO NOT run sequentially. They interleave: the orchestrator submits all images in a fire-and-forget burst, reviews each image the moment it renders, and starts a shot's video submission as soon as its image(s) pass review — all while other shots are still rendering or being retried. This collapses what used to be ~12 minutes of serial Phase 4 → Phase 5 work into ~4 minutes of overlapping activity.
 
-1. Distribute image tasks round-robin across workers (1 worker is usually enough — submissions are fast, server-side render is parallel). Each worker gets a `TASKS` array of `{shot_id, role}` objects.
-2. Each worker submits every task on NBP 2K Unlimited, downloads to `shots/shotNN_<role>.png`, and records the Higgsfield asset UUID in `images.<role>.artifact_asset_id`.
-3. **BATCH review**: dispatch ONE `image-reviewer` subagent in BATCH mode with all `{shot_id, role}` tasks. The reviewer reads every image and, for `start_end` shots, also judges morph coherence (start and end should share composition/camera/lighting, differ on one axis).
-4. For each FAIL verdict with `images.<role>.attempts < retries_per_shot`:
-   - Dispatch `prompt-writer` in RETRY mode with the reviewer's `reason` and `missing_elements`; path parameter = `images.<role>.prompt`.
-   - Enqueue the single (shot_id, role) again by setting `images.<role>.status=queued`.
-   - Re-submit and dispatch `image-reviewer` in SINGLE mode.
-5. For any image that hits the cap with no PASS: escalate to `## Questions`, set `images.<role>.status=escalated`, pause.
-6. When every image `status == pass`, update `<!-- engine:shots -->` and move on.
+#### Worker allocation
 
-**Key artifact per image**: `images.<role>.artifact_asset_id` — Phase 5's priming flow depends on it.
+- **Image-workers**: `min(total_image_tasks, 6)`. Each gets a roughly-equal slice of the `{shot_id, role}` task list, round-robin. For 8 image tasks → 6 workers, 2 of which get 2 tasks, 4 get 1 task.
+- **Video-workers**: NO separate allocation up front. As each image-worker finishes (its last task is either `rendered` or `fail`), the orchestrator marks that worker's tab FREE and spawns a video-worker on the same tab index. Tab reuse ensures we never hold more than 6 Chrome tabs open concurrently.
 
-### Phase 5 — Videos (FAST PATH: localStorage priming, with optional end-frame for start_end shots)
+#### Step-by-step orchestration
 
-This phase uses the priming pattern documented in `agents/video-worker.md` (and `references/shortcuts.md`). Per-shot cost is ~5s of setup (prime localStorage + reload + preflight + Generate click).
+1. **Enumerate image tasks.** Build the list of `{shot_id, role}` pairs — one per image in `shots.json` where `images.<role>` is non-null. For a 10-shot plan with 2 `start_end` shots, that's 12 tasks.
 
-1. Setup once: navigate to `/ai/video`, confirm Kling 3.0 selected, find the `flow-create-video-<date>` localStorage master key.
-2. For each shot (serially — server renders parallelize automatically):
-   a. Prime BOTH localStorage stores in one write:
-      - `flow-create-video-*`: `prompt = shot.video_prompt`, `inputImage = shot.images.start.artifact_asset_id`, `endImage = shot.images.end.artifact_asset_id || null` (null for `start_only`, set for `start_end`), `modelVersion = "kling3_0"`.
-      - `hf:video-kling-3-store:v2`: `duration = clamp(3, 15, round(shot.duration))`, `aspectRatio = <from frontmatter>`.
-   b. Reload the page.
-   c. Wait ~2s for re-hydration.
-   d. Preflight (one `browser_evaluate`): verify start frame attached + matches asset UUID; for `start_end` also verify end frame attached + matches; prompt filled; model Kling 3.0; Generate cost = `kling_duration × 1.75`.
-   e. If preflight passes → click Generate. If it fails → retry priming once; if still failing, fall back to the slow path (file_upload) for that shot.
-3. After all submissions, wait for Kling renders (~60–180s each). Download MP4s.
-4. Dispatch `video-reviewer` (BATCH) for motion + continuity verdict. For `start_end` clips, the reviewer additionally checks that the morph actually happened (end frame of the clip resembles the planned end image, not the start image).
-5. Same retry loop as Phase 4 for FAIL verdicts.
+2. **Dispatch image-workers (fire-and-forget).** Distribute tasks round-robin across up to 6 workers. Each worker runs `agents/image-worker.md`'s contract:
+   - Phase A (rapid-fire): submit every assigned task in ~3s each, using Lexical verify-after-fill to guard against the silent prompt-fill race observed on the Mars run (see trap entry to come).
+   - Phase B (batch poll): after all submissions, poll every 10s for completions and download as each finishes.
+   - Each completion updates `images.<role>.status` to `rendered`, stores the CDN asset UUID in `images.<role>.artifact_asset_id`, and clears `images.<role>.submitted_at` back to null.
 
-Notes:
-- Per-shot Kling duration is derived from float `shot.duration`, not hardcoded 6s. Long claims get long shots.
-- Stitcher trims each clip to exact float `shot.duration` (passed via `manifest.clips[].duration`), so total video = total VO length exactly.
-- NEVER add arbitrary waits between shot submissions. The form state is fully owned by localStorage priming; there's no UI race to wait on.
-- Do NOT re-set model between shots — it persists.
+3. **Stream review (dispatch `image-reviewer` SINGLE mode per completion).** The orchestrator polls `shots.json` every ~5s watching for `images.<role>.status == "rendered"`. When one flips:
+   - Dispatch `image-reviewer` in SINGLE mode for that single `(shot_id, role)`. These dispatches are cheap (~1s each) and they run concurrently if multiple images finish close together.
+   - On PASS: set `images.<role>.status=pass`. Check whether this shot's OTHER image (for `start_end`) is also `pass`; if both are (or the shot is `start_only`), the shot is now video-ready — see step 5.
+   - On FAIL with `images.<role>.attempts < retries_per_shot`: dispatch `prompt-writer` in RETRY mode to rewrite `images.<role>.concept_prompt`, reset `images.<role>.status=queued`, and hand the task back to ANY free image-worker (prefer the worker that was already idle) for a fresh Phase A+B cycle.
+   - On FAIL with attempts at cap: escalate — append a numbered `### Q:` to the note's `## Questions`, set `images.<role>.status=escalated`, the shot's video stays blocked (can't proceed without this image).
+
+   The key difference from BATCH review: retries can start within ~5s of a failure, overlapping with other shots' renders. The slowest shot no longer gates the review queue.
+
+   **Exception** — if ALL images happen to complete within 5 seconds of each other (tight batch, e.g. when retry volume is zero and the server renders at uniform speed), the orchestrator MAY collapse to a single BATCH dispatch for lower context overhead. This is an optimization, not a requirement.
+
+4. **Spawn video-workers as image-worker tabs free up.** An image-worker reports DONE (via its agent completion) when all its tasks are `rendered` or `fail`. At that point:
+   - The orchestrator marks the worker's tab FREE.
+   - If `next_video_ready` (the shot_state.py helper) returns a shot id, dispatch a `video-worker` on that tab index. The video-worker navigates to `/ai/video`, runs its localStorage-prime setup, and starts claiming from the shared queue.
+   - If `next_video_ready` is empty right now but some images are still pending review or retry, the tab stays warmed (worker agent stays alive polling the queue every ~10s).
+
+5. **Video-workers pull from the shared queue.** See `agents/video-worker.md`. Each video-worker repeatedly calls:
+   ```bash
+   NEXT=$(python3 $SKILL_ROOT/engine/shot_state.py next_video_ready "$OUTPUT_DIR/shots.json" "$TAB_INDEX")
+   ```
+   The engine helper atomically claims the lowest-id shot whose `video.status == "queued"` AND all required image roles have `status == "pass"`, marking it `claimed_<TAB_INDEX>` so no other worker races for it.
+
+   For each claimed shot the worker primes both localStorage stores (`flow-create-video-<date>` for prompt + input/end images + `modelVersion=kling3_0`; `hf:video-kling-3-store:v2` for duration + aspect), reloads, runs the preflight checklist, and clicks Generate. No wait between submissions.
+
+   **Kling duration derivation** (critical, last-shot rule):
+   ```
+   is_last = (shot.id == max_shot_id_in_project)
+   tail_pad = 1 if is_last else 0
+   kling_duration = max(3, min(15, round(shot.duration) + tail_pad))
+   ```
+   The +1s on the final shot provides tail material so the stitcher's freeze-frame pad doesn't land on a jump-cut to stillness.
+
+6. **Video completion review (stream, same pattern).** As each video renders and downloads, dispatch `video-reviewer` in SINGLE mode. For `start_end` clips, the reviewer checks morph continuity (end frame of the clip should resemble the planned end image). Retries follow the same stream pattern — a failed video re-queues for its video-worker, fresh Kling render.
+
+7. **Phase terminates** when every shot has `video.status in {"rendered","escalated"}` AND every image role has `status in {"pass","escalated"}`. At that point, update the `<!-- engine:shots -->` region in the note and proceed to Phase 6.
+
+#### Rate-limit handling
+
+If an image-worker reports `BLOCKED: suspected_rate_limit`, the orchestrator:
+1. Pauses new image-worker dispatches.
+2. Waits 30s.
+3. Resumes with reduced parallelism (cut worker count in half, cap per-worker submissions to 2).
+4. Logs the incident in `research_log.md` so the self-learning system (`auto-edit:traps`) can capture the NBP rate-limit pattern.
+
+The same pattern applies for video-workers reporting rate-limit.
+
+#### Key invariants preserved
+
+- Every image still passes the image-reviewer rubric before its video is submitted — the stream review pattern does NOT skip review, it just runs per-image instead of per-batch.
+- Retry count per shot is unchanged (`retries_per_shot` from frontmatter, default 5).
+- Every video still passes the preflight checklist (start-frame UUID match, prompt match, model = Kling 3.0, expected credit cost) before Generate is clicked.
+- Stitcher still trims non-last clips to exact float `shot.duration` and last clip still gets its +1s tail.
+- No serial per-shot drag-drop — video always uses localStorage priming.
 
 ### Phase 6 — Stitch
 
@@ -251,6 +291,14 @@ When dispatching a subagent, include:
 - Any agent-specific params (see `agents/<name>.md` for the exact Input section)
 
 Always pass SKILL_ROOT so subagents can invoke engine scripts without path guessing.
+
+**Parallel dispatch rules (when to send multiple tool calls in one message):**
+- Phase 3.7 with ≥4 shots → 2 `visual-researcher` dispatches, disjoint `SHOT_RANGE` (one message, two Agent calls).
+- Phase 4+5 start: up to 6 `image-worker` dispatches (one message, N Agent calls, each owning a distinct `TAB_INDEX`).
+- Phase 4+5 stream review: dispatch `image-reviewer`/`video-reviewer` (SINGLE mode) as each completion arrives — these go serial with respect to orchestrator polling, not parallel with each other (they're cheap).
+- Anything else (director, vo-analyst, stitcher) → single dispatch.
+
+The rule of thumb is: dispatch in parallel only when the tasks are truly independent AND the workers won't fight for shared state. Image-workers own disjoint tabs AND disjoint task lists; researchers own disjoint shot ranges — both safe. Reviewers are single-shot and serial-ok.
 
 ## Self-learning rules (skill auto-edit)
 
