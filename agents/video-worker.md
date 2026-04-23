@@ -44,7 +44,18 @@ This is the primary path. It sets every form field atomically via localStorage a
 
 For each `shot_id` in SHOT_IDS:
 
-1. Load the shot and verify `status.video == "queued"` and `status.image == "pass"`. Read its `video_prompt` and `artifacts.image_asset_id` (the Higgsfield asset UUID for the NBP output — for NBP this equals the UUID component of the `hf_<ts>_<uuid>_min.webp` filename).
+1. Load the shot and verify `status.video == "queued"` and `status.image == "pass"`. Read:
+   - `video_prompt` (string, < 200 chars)
+   - `artifacts.image_asset_id` (Higgsfield asset UUID; for NBP this equals the UUID component of the `hf_<ts>_<uuid>_min.webp` filename)
+   - `duration` (float seconds — the shot's intended length in the final cut)
+
+   **Derive Kling duration** from the float `shot.duration`:
+   ```python
+   # Kling 3.0 accepts integers 3..15 seconds
+   kling_duration = max(3, min(15, round(shot.duration)))
+   ```
+   So a 4.74s shot renders at 5s, a 6.46s shot renders at 6s, an 11.3s shot renders at 11s. The stitcher trims every clip back to the exact float `duration` before concat, so the final cut matches the VO alignment precisely. Variable durations per shot = better semantic pacing (long claims get long shots).
+
 2. `browser_tabs` action=select, index=$TAB_INDEX.
 3. Prime BOTH localStorage stores + reload (atomic):
    ```js
@@ -61,7 +72,7 @@ For each `shot_id` in SHOT_IDS:
      // Kling 3.0 store (duration + aspect + mode)
      const klingKey = 'hf:video-kling-3-store:v2';
      const kling = JSON.parse(localStorage.getItem(klingKey) || '{}');
-     kling.duration = args.duration || 6;   // 3..15 per trap #21
+     kling.duration = args.kling_duration;  // integer 3..15 — derived from shot.duration
      kling.aspectRatio = args.aspect_ratio || '16:9';
      localStorage.setItem(klingKey, JSON.stringify(kling));
 
@@ -90,12 +101,16 @@ For each `shot_id` in SHOT_IDS:
      const gen = [...document.querySelectorAll('button')].find(b =>
        b.innerText && /^Generate/.test(b.innerText.trim()) && b.offsetParent !== null
      );
+     // Kling 3.0 pricing: 1.75 credits per second
+     const expected_cost = (args.kling_duration * 1.75).toFixed(2).replace(/\.?0+$/, '');
      return {
        start_frame_attached: !!startImgSrc,
        start_frame_matches_shot: startImgSrc?.includes(args.image_asset_id) || false,
        prompt_matches: prompt.startsWith(args.video_prompt.slice(0, 40)),
        model_is_kling3: /kling\s*3/i.test(modelBtn?.innerText || ''),
-       generate_cost_is_10_5: gen?.innerText.includes('10.5'),  // 6s × 1.75 cr/s
+       generate_cost_ok: gen?.innerText.includes(expected_cost),
+       generate_text: gen?.innerText.trim(),
+       expected_cost,
      };
    }
    ```

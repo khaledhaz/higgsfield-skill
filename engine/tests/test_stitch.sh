@@ -84,6 +84,32 @@ has_audio=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -
 [ "$has_audio" = "audio" ] || { echo "FAIL test_stitch vo: no audio stream in output"; exit 1; }
 echo "PASS test_stitch vo-overlay"
 
+# Test 3: per-clip duration trimming (each source clip is 2s; trim to 1.3s so
+# total ≈ 3 × 1.3 = 3.9s instead of 6s)
+cat > "$TMP_DIR/manifest3.json" <<EOF
+{
+  "output": "$TMP_DIR/out3.mp4",
+  "resolution": [1920, 1080],
+  "fps": 24,
+  "clips": [
+    {"path": "$FIX_DIR/clip-red.mp4",   "type": "shot", "duration": 1.3},
+    {"path": "$FIX_DIR/clip-green.mp4", "type": "shot", "duration": 1.3},
+    {"path": "$FIX_DIR/clip-blue.mp4",  "type": "shot", "duration": 1.3}
+  ],
+  "cut_xfade": 0
+}
+EOF
+
+"$STITCH" "$TMP_DIR/manifest3.json"
+
+[ -f "$TMP_DIR/out3.mp4" ] || { echo "FAIL test_stitch trim: out3.mp4 missing"; exit 1; }
+dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$TMP_DIR/out3.mp4")
+awk -v a="$dur" 'BEGIN { exit (a >= 3.7 && a <= 4.1) ? 0 : 1 }' || {
+  echo "FAIL test_stitch trim: expected ~3.9s total (3 × 1.3), got $dur"
+  exit 1
+}
+echo "PASS test_stitch per-clip-duration ($dur s)"
+
 # Cleanup
 rm -rf "$TMP_DIR"
 echo "ALL PASSED: stitch"

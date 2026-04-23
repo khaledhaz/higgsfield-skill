@@ -21,14 +21,18 @@ You write image and video prompts that make a viewer say "that's what the narrat
 - `ASPECT`: `16:9` or `9:16` (from frontmatter)
 
 **Task:**
-1. Read `BEATS_PATH`. For each beat:
-   - If `beat.duration > 10`: split into two shots covering `[start, mid]` and `[mid, end]` where `mid = start + duration/2`. Each gets a distinct image_prompt focusing on a *different visual facet of the same claim*.
-   - Otherwise: one shot per beat.
+1. Read `BEATS_PATH`. For each beat, decide shot count using the variable-duration splitting rule:
+   - If `beat.duration <= 15s`: **1 shot** covering the whole beat. Kling 3.0 can render up to 15s, so long single-idea beats get long single shots — which look better than chopping the same claim into two abrupt cuts.
+   - If `beat.duration > 15s`: split into `ceil(beat.duration / 10)` shots of equal length (so each shot is 10–15s, within Kling's range and giving each shot enough breathing room).
+   - Each resulting shot inherits the parent beat's `claim_ar` and a facet-specific `claim_summary_en`.
+
+   Emit the shot's `start`, `end`, `duration` (floats) as exact time segments of the beat — e.g., a 27.58s beat with 3 shots gets shots at `[0, 9.19]`, `[9.19, 18.38]`, `[18.38, 27.58]` each with `duration = 9.19`. The stitcher trims each rendered clip to its exact float `duration` before concat, so shot timing aligns with VO word timings.
+
 2. For each resulting shot, write:
    - `claim_summary_en`: a 1-sentence English summary of the claim (for the reviewer).
    - `image_prompt`: a cinematic still-image prompt under 400 characters. MUST include concrete visible evidence of the claim (e.g., "3+ damaged container ships", "visible empty storage tanks with low levels indicator", "empty negotiating table + closed folders"). MUST incorporate STYLE_NOTES vocabulary. NEVER add text/numbers/brand logos.
-   - `video_prompt`: a one-sentence motion description (< 200 characters) compatible with Kling 3.0 (e.g., "slow push-in on the ship, fog drifts, smoke rises").
-3. Emit `shots.json` using the schema from the spec. Initialize all `status.*=queued`, `attempts.*=0`, `artifacts.*=null`, `reviews.*=[]`.
+   - `video_prompt`: a one-sentence motion description (< 200 characters) compatible with Kling 3.0 (e.g., "slow push-in on the ship, fog drifts, smoke rises"). Motion pacing should match `duration` — for a 10s+ shot, describe motion that actually justifies the length ("slow forward dolly then gentle arc" rather than "quick push-in").
+3. Emit `shots.json` using the schema from the spec. Initialize all `status.*=queued`, `attempts.*=0`, `artifacts.*=null`, `reviews.*=[]`. The video-worker will derive Kling's integer-seconds duration from `round(shot.duration)` clamped to [3, 15].
 4. Write the file with:
    ```bash
    python3 <skill_root>/engine/shot_state.py init "$OUTPUT_DIR/shots.json" '<json-array>'
