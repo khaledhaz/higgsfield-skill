@@ -30,6 +30,23 @@ HF_VAULT_DIR="$TEST_VAULT" "$INIT"
 
 echo "PASS test_init_vault idempotent"
 
+# v2 template shape
+grep -q "retries_per_shot: 5" "$TEST_VAULT/_templates/new-project.md" \
+  || { echo "FAIL: template missing retries_per_shot"; exit 1; }
+grep -q "parallelism: 3" "$TEST_VAULT/_templates/new-project.md" \
+  || { echo "FAIL: template missing parallelism"; exit 1; }
+grep -q "<!-- engine:beats -->" "$TEST_VAULT/_templates/new-project.md" \
+  || { echo "FAIL: template missing beats region"; exit 1; }
+grep -q "<!-- engine:shots -->" "$TEST_VAULT/_templates/new-project.md" \
+  || { echo "FAIL: template missing shots region"; exit 1; }
+grep -q "<!-- engine:reviews -->" "$TEST_VAULT/_templates/new-project.md" \
+  || { echo "FAIL: template missing reviews region"; exit 1; }
+if grep -q "^shots: \[\]" "$TEST_VAULT/_templates/new-project.md"; then
+  echo "FAIL: v1 'shots: []' placeholder still present"
+  exit 1
+fi
+echo "PASS test_init_vault v2-schema"
+
 # Cleanup
 rm -rf "$TEST_VAULT"
 echo "ALL PASSED: init_vault"

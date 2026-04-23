@@ -25,17 +25,26 @@ vo:
     (paste the narration script here)
   model: eleven-v3
   voice: TALLULAH
-transitions:
-  mode: half-half
-  seamless_pairs: []
-retries_per_shot: 3
+retries_per_shot: 5
+parallelism: 3
 schedule: null
-shots: []
 ---
 
 ## Script
 
 ## Style notes
+
+## Beats
+<!-- engine:beats -->
+<!-- /engine:beats -->
+
+## Shots
+<!-- engine:shots -->
+<!-- /engine:shots -->
+
+## Review log
+<!-- engine:reviews -->
+<!-- /engine:reviews -->
 
 ## Execution log
 <!-- engine:begin -->
