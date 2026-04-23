@@ -113,22 +113,39 @@ Write the script text from frontmatter's `vo.script` field to `$OUTPUT_DIR/scrip
 
 Extract the `## Style notes` section from the note body. Dispatch `prompt-writer` with `OUTPUT_DIR`, `BEATS_PATH`, `SCRIPT_PATH`, `STYLE_NOTES`, `ASPECT`. On `DONE`, read `shots.json`, render a markdown table, update `<!-- engine:shots -->`.
 
-### Phase 4 — Images (dispatch 3× `image-worker` + `image-reviewer` loop)
+### Phase 4 — Images (dispatch workers + BATCH reviewer)
 
-1. Compute worker assignments: round-robin `shot_ids` across 3 workers (worker 0 gets ids `[1,4,7,...]`, etc.).
-2. Open 3 tabs in Chrome (open new tabs via `mcp__playwright__browser_tabs action=new` twice after the default tab).
-3. Dispatch 3 `image-worker` subagents in parallel (single `Agent` call with 3 tool uses). Wait for all three to report DONE.
-4. For each shot with `status.image == rendered`, dispatch `image-reviewer` (serially — the reviewer has no browser contention).
-5. For each FAIL verdict with `attempts.image < retries_per_shot`:
+1. Compute worker assignments: round-robin `shot_ids` across 3 workers, OR use a single worker for all shots if the count is ≤12 (server-side render is already parallel; one-tab submission is simpler and only loses ~10s). Single-worker is the default.
+2. Submit every shot's `image_prompt` on NBP 2K Unlimited. Download each result's PNG to `shots/shotNN.png`, record the Higgsfield asset UUID in `artifacts.image_asset_id` (for NBP outputs this equals the UUID component of the `hf_<ts>_<uuid>_min.webp` filename).
+3. **Batch review**: dispatch ONE `image-reviewer` subagent in BATCH mode with `SHOT_IDS=[1,2,…N]`. The reviewer reads all N images and records verdicts in a single pass. Saves ~1s/shot of context-build overhead vs N sequential dispatches.
+4. For each FAIL verdict with `attempts.image < retries_per_shot`:
    - Dispatch `prompt-writer` in RETRY mode with the reviewer's `reason` and `missing_elements`.
    - Enqueue the shot again by setting `status.image=queued`.
-6. Re-assign queued shots to workers (same round-robin) and re-dispatch. Repeat until all shots PASS or hit the retry cap.
-7. For any shot that hits the cap with no PASS: write to the note's `## Questions` section ("Shot N image exhausted retries; last reason: `<reason>`. Accept attempt K (`shots/shotNN_kK.png`), edit prompt, or skip?"), set `status.image=escalated`, and pause until the user responds.
-8. When all shots `status.image == pass`, update `<!-- engine:shots -->` table and move on.
+   - Re-submit the single shot and dispatch `image-reviewer` in SINGLE mode for the re-review.
+5. For any shot that hits the cap with no PASS: escalate to `## Questions`, set `status.image=escalated`, pause.
+6. When all shots `status.image == pass`, update `<!-- engine:shots -->` table and move on.
 
-### Phase 5 — Videos (dispatch 3× `video-worker` + `video-reviewer` loop)
+**Key artifact**: each shot's `artifacts.image_asset_id` must be the Higgsfield-native asset UUID — Phase 5's fast path depends on it.
 
-Mirrors Phase 4 but for Kling 3.0 animations. Depends on all shots having `status.image == pass`. Reviewer samples 3 frames and judges motion + continuity.
+### Phase 5 — Videos (FAST PATH: localStorage priming)
+
+This phase uses the priming pattern documented in `agents/video-worker.md` (and `references/shortcuts.md`). Per-shot cost is ~5s of setup (prime localStorage + reload + preflight + Generate click) vs ~90s for the legacy upload dance.
+
+1. Setup once: navigate to `/ai/video`, verify Kling 3.0 + 6s duration are selected, find the `flow-create-video-<date>` localStorage master key.
+2. For each shot (serially — server renders parallelize automatically):
+   a. Prime localStorage: set `prompt = shot.video_prompt`, `inputImage = shot.artifacts.image_asset_id`, `endImage = null`, `modelVersion = "kling3_0"`.
+   b. Reload the page (`browser_navigate` to the same URL).
+   c. Wait ~2s for re-hydration.
+   d. Run the preflight checklist (one `browser_evaluate`): verify start_frame attached + matches expected UUID, prompt filled with expected text, model = Kling 3.0, generate cost = 10.5 (6s × 1.75).
+   e. If preflight passes → click Generate. If it fails → retry priming once, else fall back to the slow path (file_upload) for that one shot.
+3. After all submissions, wait for Kling renders (~60–180s each, server-side parallel). Download MP4s.
+4. Dispatch `video-reviewer` (BATCH or SINGLE depending on count) for motion + continuity verdict.
+5. Same retry loop as Phase 4 for FAIL verdicts.
+
+Notes:
+- Multi-tab parallelism is optional and usually not worth the coordination overhead — serial submission in one tab takes ~45s for 9 shots.
+- NEVER add arbitrary waits between shot submissions. The form state is fully owned by localStorage priming; there's no UI race to wait on.
+- Do NOT re-set duration or model between shots — they persist in `hf:video-kling-3-store:v2` across reloads.
 
 ### Phase 6 — Stitch
 
