@@ -66,4 +66,38 @@ second_claim=$(echo "$OUTPUT" | python3 -c "import json,sys; print(json.loads(sy
 echo "$second_claim" | grep -q "التقطير" || { echo "FAIL: second beat claim_ar missing expected token: '$second_claim'"; exit 1; }
 echo "PASS test_vo_analyze_align second-beat-claim-text"
 
+# Case 4: more claims than Whisper words → every claim still gets a beat
+# (3-claim script, single-word Whisper output — fallback covers the rest)
+cat > "$FIX_DIR/whisper-short.json" <<'EOF'
+{
+  "segments": [
+    { "start": 0.0, "end": 1.0,
+      "words": [
+        {"word": "ارتفعت", "start": 0.1, "end": 0.5, "probability": 0.9},
+        {"word": ".", "start": 0.5, "end": 0.55, "probability": 0.99}
+      ]
+    }
+  ]
+}
+EOF
+cat > "$FIX_DIR/script-short.txt" <<'EOF'
+ارتفعت أسعار النفط. زيادة في الطلب. مخاوف من النقص.
+EOF
+OUTPUT=$(python3 - "$VA" "$FIX_DIR/whisper-short.json" "$FIX_DIR/script-short.txt" <<'PYEOF'
+import sys, json, importlib.util
+spec = importlib.util.spec_from_file_location("va", sys.argv[1])
+va = importlib.util.module_from_spec(spec); spec.loader.exec_module(va)
+whisper_data = json.load(open(sys.argv[2]))
+script = open(sys.argv[3]).read()
+beats = va.align(whisper_data["segments"], script)
+print(json.dumps(beats, ensure_ascii=False))
+PYEOF
+)
+count=$(echo "$OUTPUT" | python3 -c "import json,sys; print(len(json.loads(sys.stdin.read())))")
+[ "$count" = "3" ] || { echo "FAIL: expected 3 beats (one per claim), got $count"; exit 1; }
+# Last beat must have sequential id (no gaps) and zero or small duration
+last_id=$(echo "$OUTPUT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read())[-1]['id'])")
+[ "$last_id" = "3" ] || { echo "FAIL: expected last id=3, got $last_id"; exit 1; }
+echo "PASS test_vo_analyze_align more-claims-than-words"
+
 echo "ALL PASSED: vo_analyze_align"

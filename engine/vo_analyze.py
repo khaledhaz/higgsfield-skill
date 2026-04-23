@@ -31,7 +31,7 @@ except ImportError:
     fuzz = None  # only needed for fuzzy fallback; exact-match path works without it
 
 
-SENTENCE_SPLIT_RE = re.compile(r"[.؟!۔؛]|۔|\n{2,}")
+SENTENCE_SPLIT_RE = re.compile(r"[.?؟!۔؛]|\s{3,}")
 
 
 def _split_script(script_text: str) -> list:
@@ -129,24 +129,38 @@ def align(whisper_segments: list, script_text: str, beat_splits: list = None) ->
             end_excl = min(len(words), cursor + span)
 
         span_words = words[begin:end_excl]
-        if not span_words:
-            continue
-        start_t = span_words[0]["start"]
-        end_t = span_words[-1]["end"]
-        mean_conf = sum(w["prob"] for w in span_words) / len(span_words)
+        if span_words:
+            start_t = span_words[0]["start"]
+            end_t = span_words[-1]["end"]
+            mean_conf = sum(w["prob"] for w in span_words) / len(span_words)
+            beats.append({
+                "id": idx,
+                "claim_ar": claim,
+                "claim_en": "",
+                "start": round(start_t, 3),
+                "end": round(end_t, 3),
+                "duration": round(end_t - start_t, 3),
+                "word_count": len(span_words),
+                "confidence": round(mean_conf, 3),
+            })
+            cursor = end_excl
+        else:
+            anchor = beats[-1]["end"] if beats else 0.0
+            print(f"vo_analyze: claim {idx} had no audio words", file=sys.stderr)
+            beats.append({
+                "id": idx,
+                "claim_ar": claim,
+                "claim_en": "",
+                "start": round(anchor, 3),
+                "end": round(anchor, 3),
+                "duration": 0.0,
+                "word_count": 0,
+                "confidence": 0.0,
+            })
 
-        beats.append({
-            "id": idx,
-            "claim_ar": claim,
-            "claim_en": "",
-            "start": round(start_t, 3),
-            "end": round(end_t, 3),
-            "duration": round(end_t - start_t, 3),
-            "word_count": len(span_words),
-            "confidence": round(mean_conf, 3),
-        })
-        cursor = end_excl
-
+    # Defensive: re-sequence ids so gaps (from any future logic) don't break consumers.
+    for i, b in enumerate(beats, start=1):
+        b["id"] = i
     return beats
 
 
