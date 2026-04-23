@@ -124,7 +124,27 @@ After DONE, read `shots.json` and render the shots-table region in the note. Sav
 **Invariants the orchestrator verifies**:
 - `sum(shot.duration) === VO_DURATION` (±0.01s).
 - Every beat covered by ≥ 1 shot (`beat_ids` unions tile the beats).
-- Every shot has `images.start.prompt`. `start_end` shots additionally have `images.end.prompt`.
+- Every shot has a non-empty `visual_concept` string.
+- Every shot has a `cinematic_technique` from the allowed set (`synecdoche`, `juxtaposition`, `scale_contrast`, `negative_space`, `environmental_storytelling`, `visual_irony`, `literal`).
+- In projects with 4+ shots, at least 2 distinct cinematic techniques are used (technique-variety rule).
+- Every image has `images.start.concept_prompt` (<280 chars) and NO style/palette/grain vocabulary in it. `start_end` shots additionally have `images.end.concept_prompt`.
+- `images.<role>.style_prompt` and `images.<role>.prompt` are `null` at this stage — they get populated in Phase 3.5 and Phase 4 respectively.
+
+### Phase 3.5 — Style injection (orchestrator, not a subagent)
+
+After the director returns `shots.json`, the orchestrator reads the project note's `## Style notes` section and builds a single `style_prompt` string:
+
+```
+<style vocabulary from ## Style notes>, <aspect ratio from frontmatter>, no text, no numbers, no logos, no readable flags
+```
+
+Then for every image entry in every shot, set `images.<role>.style_prompt` to this string:
+
+```bash
+python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_id> "images.<role>.style_prompt=<built-style-string>"
+```
+
+This guarantees every image in the package shares identical rendering instructions regardless of which agent wrote the concept, and that retries on individual shots never drift the package's visual identity. The image-worker concatenates `concept_prompt + ", " + style_prompt` → `prompt` at submission time.
 
 ### Phase 4 — Images (dispatch workers + BATCH reviewer)
 

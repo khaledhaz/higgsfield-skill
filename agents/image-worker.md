@@ -29,9 +29,17 @@ You are one of three parallel image-workers. You OWN a Chrome tab by index and o
 
 For each `{shot_id, role}` in your assigned list:
 
-1. Read the target prompt:
+1. Read BOTH halves of the prompt and concatenate:
    ```bash
-   PROMPT=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id images.$role.prompt)
+   CONCEPT=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id images.$role.concept_prompt)
+   STYLE=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id images.$role.style_prompt)
+   FULL_PROMPT="$CONCEPT, $STYLE"
+   ```
+   The `concept_prompt` is the pure scene/subject half (director-written, rewritten on retries). The `style_prompt` is the pure rendering half (orchestrator-injected in Phase 3.5 from the project's Style Notes, constant across all retries). Concatenation happens HERE at submission time — that's why `images.<role>.prompt` is `null` in shots.json until the image-worker runs.
+
+   Record the concatenated prompt in shots.json for debugging:
+   ```bash
+   python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id "images.$role.prompt=$FULL_PROMPT"
    ```
 2. Verify it's queued:
    ```bash
@@ -46,7 +54,7 @@ For each `{shot_id, role}` in your assigned list:
    python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id "images.$role.attempts=$((ATT+1))"
    ```
 4. Switch to YOUR tab: `browser_tabs action=select, index=$TAB_INDEX`.
-5. Fill the prompt textbox with `$PROMPT` using `mcp__playwright__browser_type` (`fill()` is Lexical-safe, see trap #10b).
+5. Fill the prompt textbox with `$FULL_PROMPT` (NOT `$CONCEPT` alone) using `mcp__playwright__browser_type` (`fill()` is Lexical-safe, see trap #10b).
 6. Click the visible Generate button.
 7. Set `images.<role>.status=rendering`.
 8. Poll every ~8s for a new `img[alt="image generation"]` thumbnail with a timestamp later than submission time. Timeout at 90s → mark `images.<role>.status=fail` with a review capturing the technical failure.
