@@ -164,9 +164,57 @@ def align(whisper_segments: list, script_text: str, beat_splits: list = None) ->
     return beats
 
 
+import os
+import tempfile
+import time
+
+
+def run_whisper(audio_path: Path, model_name: str = "medium") -> list:
+    """Invoke openai-whisper and return its segments list (with word timestamps)."""
+    import whisper as _whisper  # lazy import: slow to load
+    model = _whisper.load_model(model_name)
+    result = model.transcribe(str(audio_path), word_timestamps=True, verbose=False)
+    return result.get("segments", [])
+
+
+def analyze(audio_path: Path, script_path: Path, beats_out_path: Path,
+            model_name: str = None) -> int:
+    if not audio_path.is_file():
+        raise FileNotFoundError(f"audio not found: {audio_path}")
+    if not script_path.is_file():
+        raise FileNotFoundError(f"script not found: {script_path}")
+    model_name = model_name or os.environ.get("HF_WHISPER_MODEL", "medium")
+
+    t0 = time.time()
+    segments = run_whisper(audio_path, model_name=model_name)
+    script_text = script_path.read_text()
+    beats = align(segments, script_text)
+    elapsed = time.time() - t0
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=beats_out_path.parent,
+                                        prefix=".vo_analyze_", suffix=".tmp")
+    try:
+        with open(tmp_fd, "w") as f:
+            json.dump(beats, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        Path(tmp_path).replace(beats_out_path)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+    print(f"OK {len(beats)} beats in {elapsed:.1f}s")
+    return 0
+
+
 def main() -> int:
-    print("vo_analyze: CLI not yet implemented (Task 5).", file=sys.stderr)
-    return 2
+    if len(sys.argv) != 4:
+        print("Usage: vo_analyze.py <audio-path> <script-path> <beats-out-path>", file=sys.stderr)
+        return 2
+    try:
+        return analyze(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
