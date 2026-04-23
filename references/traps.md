@@ -47,6 +47,8 @@ The image page's Lexical editor reads from `hf:image-form-upd.prompt` on mount. 
 `dispatchEvent(new ClipboardEvent('paste'))` inserts at cursor position. If the textbox has old content, you'll get concatenation. **Clear first**: `document.execCommand('selectAll'); document.execCommand('delete');` then paste.
 
 <!-- auto-edit:traps category=session-state -->
+### 10b. `execCommand('delete')` and `innerHTML=''` silently fail on Lexical when batching via JS loop
+Observed 2026-04-23 in oil-hormuz-news run: a loop that did `document.execCommand('selectAll'); document.execCommand('delete'); dispatchPaste(nextPrompt);` per iteration did NOT clear the textbox. Each paste concatenated to the prior text — by iteration 9 the prompt was 10 scripts long. The fallback `ed.innerHTML = ''` also failed (Lexical reconstructs the editor state from its internal model, ignoring direct DOM mutations). **Reliable fix: use Playwright's native `browser_type` (maps to `page.locator().fill()`) between shots.** `fill()` performs a real selectAll+replace that Lexical honors. If you must stay in JS, write to `localStorage['hf:image-form-upd']` and reload the page — but this is slower than native Playwright fill.
 <!-- /auto-edit:traps -->
 
 ## UI discovery traps (these waste time hunting)
