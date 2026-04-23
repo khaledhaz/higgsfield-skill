@@ -35,12 +35,18 @@ For each `{shot_id, role}` in your assigned list:
    STYLE=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id images.$role.style_prompt)
    FULL_PROMPT="$CONCEPT, $STYLE"
    ```
-   The `concept_prompt` is the pure scene/subject half (director-written, rewritten on retries). The `style_prompt` is the pure rendering half (orchestrator-injected in Phase 3.5 from the project's Style Notes, constant across all retries). Concatenation happens HERE at submission time — that's why `images.<role>.prompt` is `null` in shots.json until the image-worker runs.
+   The `concept_prompt` is the pure scene/subject half (director-written, enriched with physical-accuracy details by the visual-researcher in Phase 3.7, rewritten on retries). The `style_prompt` is the pure rendering half (orchestrator-injected in Phase 3.5 from the project's Style Notes, constant across all retries). Concatenation happens HERE at submission time — that's why `images.<role>.prompt` is `null` in shots.json until the image-worker runs.
 
    Record the concatenated prompt in shots.json for debugging:
    ```bash
    python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id "images.$role.prompt=$FULL_PROMPT"
    ```
+
+   **Optional reference-image attachment** — check whether the visual-researcher attached reference URLs:
+   ```bash
+   REF_URLS=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id images.$role.reference_urls)
+   ```
+   If `$REF_URLS` is a non-empty JSON array (e.g. `["https://..."]`) AND NBP's current UI exposes a reference-image input, you MAY download one of the URLs and attach it to the form to nudge NBP toward the correct real-world appearance. If NBP doesn't expose a reference input, or the download fails, or you're unsure — skip silently. The enriched `concept_prompt` is the primary accuracy mechanism; reference URLs are a bonus. Never BLOCK a shot on reference-URL handling.
 2. Verify it's queued:
    ```bash
    STATUS=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id images.$role.status)

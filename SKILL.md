@@ -146,6 +146,21 @@ python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_i
 
 This guarantees every image in the package shares identical rendering instructions regardless of which agent wrote the concept, and that retries on individual shots never drift the package's visual identity. The image-worker concatenates `concept_prompt + ", " + style_prompt` → `prompt` at submission time.
 
+### Phase 3.7 — Visual research (dispatch `visual-researcher`)
+
+Between style injection and image generation, dispatch the `visual-researcher` subagent to enrich every shot's `concept_prompt` with real-world physical-accuracy details. The director decided WHAT to show (composition, technique, intent). The researcher makes sure every named element in the frame LOOKS CORRECT when NBP renders it — named buildings, specific weapon systems, country-specific people/attire, industrial equipment, landmark geography.
+
+Dispatch the `visual-researcher` with `OUTPUT_DIR`, `SCRIPT_PATH`, `SKILL_ROOT`, `SLUG`. The agent reads every shot's `visual_concept` and `concept_prompt`, runs targeted web searches (max 20/project, max 3/element), and appends physical descriptors to the concept_prompt — without changing the composition, camera angle, cinematic technique, or editorial intent the director decided. For specific named landmarks/equipment/vehicles, it may also attach reference image URLs to `images.<role>.reference_urls` (JSON array) for the image-worker's optional use.
+
+After DONE, the orchestrator verifies:
+- Every `concept_prompt` is still ≤280 chars.
+- No concept_prompt gained style/palette/grain vocabulary (style-bleed guard).
+- No concept_prompt gained "no text / no logos / no flags" phrasing (that lives in `style_prompt`).
+- `$OUTPUT_DIR/research_log.md` exists with a per-(shot, role) entry for human review.
+- `visual_concept`, `cinematic_technique`, `director_intent`, `claim_summary_en`, `duration`, `technique` on every shot are unchanged (researcher never modifies director fields).
+
+If any invariant is broken, the orchestrator reverts the offending shot's `concept_prompt` to the pre-research value and logs the revert before moving on. Phase 3.7 is additive-only; a partial enrichment (some shots got enriched, others didn't) is acceptable — the enriched concept_prompt is the primary accuracy mechanism, reference URLs are a bonus.
+
 ### Phase 4 — Images (dispatch workers + BATCH reviewer)
 
 With the director's plan in hand, the orchestrator enumerates every image task: the list of `{shot_id, role}` pairs where `role ∈ {start, end}`. For a 6-shot plan with 2 `start_end` shots, that's 6 + 2 = 8 image tasks.
