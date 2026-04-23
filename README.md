@@ -7,10 +7,14 @@ A Claude Code skill for agentic video/image generation on [higgsfield.ai](https:
 Write a project spec as an Obsidian note (script, style, voice, aspect). Say "run `<slug>`". The skill:
 
 1. Generates the voiceover on Eleven v3 (if specified).
-2. Plans shots to fit the VO's measured duration.
-3. Generates hero images (Nano Banana Pro), animates them (Kling 3.0), builds seamless Hollywood-style transitions where requested.
-4. Stitches the final MP4 with ffmpeg.
-5. Writes every step back into the same Obsidian note as a live log.
+2. **Runs Whisper word-level transcription** on the VO and aligns it to the script to produce per-claim timestamps (`beats.json`).
+3. **Dispatches a prompt-writer subagent** to produce image+video prompts per beat with strict visual-journalism rules.
+4. **Dispatches 3 parallel image-worker subagents** (each owns a Chrome tab) to generate hero images on Nano Banana Pro 2K Unlimited.
+5. **Dispatches a vision-enabled image-reviewer subagent** per shot. Failures feed back into prompt-writer for up to 5 retries, then escalate to the user.
+6. **Dispatches 3 parallel video-worker subagents** to animate approved images on Kling 3.0 (720p, 6s).
+7. **Dispatches a video-reviewer subagent** to check motion + continuity per clip; same 5-retry loop.
+8. Stitches the final MP4 with ffmpeg.
+9. Writes every step back into the same Obsidian note as a live log.
 
 Four invocation modes:
 
