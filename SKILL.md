@@ -109,47 +109,82 @@ Produce `vo.mp3` using Eleven v3 with the voice named in frontmatter. Overwrite 
 
 Write the script text from frontmatter's `vo.script` field to `$OUTPUT_DIR/script.txt`. Dispatch the `vo-analyst` subagent with `VAULT_DIR`, `OUTPUT_DIR`, `SCRIPT_PATH`. On `DONE`, read `beats.json`, render a markdown table, and update the note's `<!-- engine:beats -->` region via `engine/update_region.py`.
 
-### Phase 3 — Prompt planning (dispatch `prompt-writer` in INIT mode)
+### Phase 3 — Director planning (dispatch `director`)
 
-Extract the `## Style notes` section from the note body. Dispatch `prompt-writer` with `OUTPUT_DIR`, `BEATS_PATH`, `SCRIPT_PATH`, `STYLE_NOTES`, `ASPECT`. On `DONE`, read `shots.json`, render a markdown table, update `<!-- engine:shots -->`.
+The `director` subagent (Opus-tier) plans the full montage: how many shots, how long each one runs, which shots use single-frame animation vs start→end morph, and the image+video prompts for each. This replaces the old mechanical `prompt-writer` INIT flow.
+
+Dispatch the `director` with `OUTPUT_DIR`, `SCRIPT_PATH`, `BEATS_PATH`, `VO_DURATION`, `STYLE_NOTES`, `ASPECT`, `SKILL_ROOT`.
+
+The director produces:
+- `shots.json` — array of shot objects with per-shot `technique` (`start_only` or `start_end`), `images.start.prompt` (always), `images.end.prompt` (only if `start_end`), `video_prompt`, `director_intent`, float `duration`.
+- `director_notes.md` — narrative rationale (arc, pacing, technique choices).
+
+After DONE, read `shots.json` and render the shots-table region in the note. Save `director_notes.md` alongside it for the user to review.
+
+**Invariants the orchestrator verifies**:
+- `sum(shot.duration) === VO_DURATION` (±0.01s).
+- Every beat covered by ≥ 1 shot (`beat_ids` unions tile the beats).
+- Every shot has `images.start.prompt`. `start_end` shots additionally have `images.end.prompt`.
 
 ### Phase 4 — Images (dispatch workers + BATCH reviewer)
 
-1. Compute worker assignments: round-robin `shot_ids` across 3 workers, OR use a single worker for all shots if the count is ≤12 (server-side render is already parallel; one-tab submission is simpler and only loses ~10s). Single-worker is the default.
-2. Submit every shot's `image_prompt` on NBP 2K Unlimited. Download each result's PNG to `shots/shotNN.png`, record the Higgsfield asset UUID in `artifacts.image_asset_id` (for NBP outputs this equals the UUID component of the `hf_<ts>_<uuid>_min.webp` filename).
-3. **Batch review**: dispatch ONE `image-reviewer` subagent in BATCH mode with `SHOT_IDS=[1,2,…N]`. The reviewer reads all N images and records verdicts in a single pass. Saves ~1s/shot of context-build overhead vs N sequential dispatches.
-4. For each FAIL verdict with `attempts.image < retries_per_shot`:
-   - Dispatch `prompt-writer` in RETRY mode with the reviewer's `reason` and `missing_elements`.
-   - Enqueue the shot again by setting `status.image=queued`.
-   - Re-submit the single shot and dispatch `image-reviewer` in SINGLE mode for the re-review.
-5. For any shot that hits the cap with no PASS: escalate to `## Questions`, set `status.image=escalated`, pause.
-6. When all shots `status.image == pass`, update `<!-- engine:shots -->` table and move on.
+With the director's plan in hand, the orchestrator enumerates every image task: the list of `{shot_id, role}` pairs where `role ∈ {start, end}`. For a 6-shot plan with 2 `start_end` shots, that's 6 + 2 = 8 image tasks.
 
-**Key artifact**: each shot's `artifacts.image_asset_id` must be the Higgsfield-native asset UUID — Phase 5's fast path depends on it.
+1. Distribute image tasks round-robin across workers (1 worker is usually enough — submissions are fast, server-side render is parallel). Each worker gets a `TASKS` array of `{shot_id, role}` objects.
+2. Each worker submits every task on NBP 2K Unlimited, downloads to `shots/shotNN_<role>.png`, and records the Higgsfield asset UUID in `images.<role>.artifact_asset_id`.
+3. **BATCH review**: dispatch ONE `image-reviewer` subagent in BATCH mode with all `{shot_id, role}` tasks. The reviewer reads every image and, for `start_end` shots, also judges morph coherence (start and end should share composition/camera/lighting, differ on one axis).
+4. For each FAIL verdict with `images.<role>.attempts < retries_per_shot`:
+   - Dispatch `prompt-writer` in RETRY mode with the reviewer's `reason` and `missing_elements`; path parameter = `images.<role>.prompt`.
+   - Enqueue the single (shot_id, role) again by setting `images.<role>.status=queued`.
+   - Re-submit and dispatch `image-reviewer` in SINGLE mode.
+5. For any image that hits the cap with no PASS: escalate to `## Questions`, set `images.<role>.status=escalated`, pause.
+6. When every image `status == pass`, update `<!-- engine:shots -->` and move on.
 
-### Phase 5 — Videos (FAST PATH: localStorage priming)
+**Key artifact per image**: `images.<role>.artifact_asset_id` — Phase 5's priming flow depends on it.
 
-This phase uses the priming pattern documented in `agents/video-worker.md` (and `references/shortcuts.md`). Per-shot cost is ~5s of setup (prime localStorage + reload + preflight + Generate click) vs ~90s for the legacy upload dance.
+### Phase 5 — Videos (FAST PATH: localStorage priming, with optional end-frame for start_end shots)
 
-1. Setup once: navigate to `/ai/video`, verify Kling 3.0 + 6s duration are selected, find the `flow-create-video-<date>` localStorage master key.
+This phase uses the priming pattern documented in `agents/video-worker.md` (and `references/shortcuts.md`). Per-shot cost is ~5s of setup (prime localStorage + reload + preflight + Generate click).
+
+1. Setup once: navigate to `/ai/video`, confirm Kling 3.0 selected, find the `flow-create-video-<date>` localStorage master key.
 2. For each shot (serially — server renders parallelize automatically):
-   a. Prime localStorage: set `prompt = shot.video_prompt`, `inputImage = shot.artifacts.image_asset_id`, `endImage = null`, `modelVersion = "kling3_0"`.
-   b. Reload the page (`browser_navigate` to the same URL).
+   a. Prime BOTH localStorage stores in one write:
+      - `flow-create-video-*`: `prompt = shot.video_prompt`, `inputImage = shot.images.start.artifact_asset_id`, `endImage = shot.images.end.artifact_asset_id || null` (null for `start_only`, set for `start_end`), `modelVersion = "kling3_0"`.
+      - `hf:video-kling-3-store:v2`: `duration = clamp(3, 15, round(shot.duration))`, `aspectRatio = <from frontmatter>`.
+   b. Reload the page.
    c. Wait ~2s for re-hydration.
-   d. Run the preflight checklist (one `browser_evaluate`): verify start_frame attached + matches expected UUID, prompt filled with expected text, model = Kling 3.0, generate cost = 10.5 (6s × 1.75).
-   e. If preflight passes → click Generate. If it fails → retry priming once, else fall back to the slow path (file_upload) for that one shot.
-3. After all submissions, wait for Kling renders (~60–180s each, server-side parallel). Download MP4s.
-4. Dispatch `video-reviewer` (BATCH or SINGLE depending on count) for motion + continuity verdict.
+   d. Preflight (one `browser_evaluate`): verify start frame attached + matches asset UUID; for `start_end` also verify end frame attached + matches; prompt filled; model Kling 3.0; Generate cost = `kling_duration × 1.75`.
+   e. If preflight passes → click Generate. If it fails → retry priming once; if still failing, fall back to the slow path (file_upload) for that shot.
+3. After all submissions, wait for Kling renders (~60–180s each). Download MP4s.
+4. Dispatch `video-reviewer` (BATCH) for motion + continuity verdict. For `start_end` clips, the reviewer additionally checks that the morph actually happened (end frame of the clip resembles the planned end image, not the start image).
 5. Same retry loop as Phase 4 for FAIL verdicts.
 
 Notes:
-- Multi-tab parallelism is optional and usually not worth the coordination overhead — serial submission in one tab takes ~45s for 9 shots.
+- Per-shot Kling duration is derived from float `shot.duration`, not hardcoded 6s. Long claims get long shots.
+- Stitcher trims each clip to exact float `shot.duration` (passed via `manifest.clips[].duration`), so total video = total VO length exactly.
 - NEVER add arbitrary waits between shot submissions. The form state is fully owned by localStorage priming; there's no UI race to wait on.
-- Do NOT re-set duration or model between shots — they persist in `hf:video-kling-3-store:v2` across reloads.
+- Do NOT re-set model between shots — it persists.
 
 ### Phase 6 — Stitch
 
-Write `manifest.json` with the approved clip paths in shot order, `resolution: [1280, 720]`, `fps: 24`, `vo.path` pointing to `vo.mp3`, `cut_xfade: 0`. Run `engine/stitch.sh manifest.json`. Capture the printed duration; it should equal VO duration ±0.2s.
+Write `manifest.json`. For each clip include `path` AND the exact float `duration` from `shots.json` — the stitcher trims every clip with `-t $duration` before concat, so the final video track aligns to VO word timings precisely:
+
+```json
+{
+  "output": ".../final.mp4",
+  "resolution": [1280, 720],
+  "fps": 24,
+  "vo": {"path": ".../vo.mp3"},
+  "cut_xfade": 0,
+  "clips": [
+    {"type": "video", "path": ".../clips/clip01.mp4", "duration": 9.48},
+    {"type": "video", "path": ".../clips/clip02.mp4", "duration": 12.92},
+    ...
+  ]
+}
+```
+
+Run `engine/stitch.sh manifest.json`. Capture the printed duration; it should equal VO duration ±0.2s.
 
 ### Phase 7 — Finalize
 

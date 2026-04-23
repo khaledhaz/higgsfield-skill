@@ -44,9 +44,11 @@ This is the primary path. It sets every form field atomically via localStorage a
 
 For each `shot_id` in SHOT_IDS:
 
-1. Load the shot and verify `status.video == "queued"` and `status.image == "pass"`. Read:
+1. Load the shot and verify `video.status == "queued"`, `images.start.status == "pass"`, and (if `technique == "start_end"`) `images.end.status == "pass"`. Read:
    - `video_prompt` (string, < 200 chars)
-   - `artifacts.image_asset_id` (Higgsfield asset UUID; for NBP this equals the UUID component of the `hf_<ts>_<uuid>_min.webp` filename)
+   - `technique` (`"start_only"` or `"start_end"`)
+   - `images.start.artifact_asset_id` (always required)
+   - `images.end.artifact_asset_id` (required only if `technique == "start_end"`)
    - `duration` (float seconds — the shot's intended length in the final cut)
 
    **Derive Kling duration** from the float `shot.duration`:
@@ -54,29 +56,30 @@ For each `shot_id` in SHOT_IDS:
    # Kling 3.0 accepts integers 3..15 seconds
    kling_duration = max(3, min(15, round(shot.duration)))
    ```
-   So a 4.74s shot renders at 5s, a 6.46s shot renders at 6s, an 11.3s shot renders at 11s. The stitcher trims every clip back to the exact float `duration` before concat, so the final cut matches the VO alignment precisely. Variable durations per shot = better semantic pacing (long claims get long shots).
+   So a 4.74s shot renders at 5s, a 6.46s shot renders at 6s, an 11.3s shot renders at 11s. The stitcher trims every clip back to the exact float `duration` before concat, so the final cut matches the VO alignment precisely.
 
 2. `browser_tabs` action=select, index=$TAB_INDEX.
 3. Prime BOTH localStorage stores + reload (atomic):
    ```js
    (args) => {
-     // Master form state (prompt + input image + model)
+     // Master form state (prompt + input image + optional end image + model)
      const formKey = Object.keys(localStorage).find(k => k.startsWith('flow-create-video-'));
      const form = JSON.parse(localStorage.getItem(formKey) || '{}');
      form.prompt = args.video_prompt;
-     form.inputImage = args.image_asset_id;
-     form.endImage = null;                  // Kling 3.0 is prompt-driven, not morph-interpolating
+     form.inputImage = args.start_image_asset_id;
+     // End image only for start_end technique; null clears the End frame slot
+     form.endImage = args.end_image_asset_id || null;
      form.modelVersion = 'kling3_0';
      localStorage.setItem(formKey, JSON.stringify(form));
 
-     // Kling 3.0 store (duration + aspect + mode)
+     // Kling 3.0 store (duration + aspect)
      const klingKey = 'hf:video-kling-3-store:v2';
      const kling = JSON.parse(localStorage.getItem(klingKey) || '{}');
-     kling.duration = args.kling_duration;  // integer 3..15 — derived from shot.duration
+     kling.duration = args.kling_duration;   // integer 3..15 — derived from shot.duration
      kling.aspectRatio = args.aspect_ratio || '16:9';
      localStorage.setItem(klingKey, JSON.stringify(kling));
 
-     return { formKey, duration: kling.duration };
+     return { formKey, duration: kling.duration, has_end_frame: !!args.end_image_asset_id };
    }
    ```
    Then `browser_navigate` to `https://higgsfield.ai/ai/video` (reload loads the primed state).
@@ -90,11 +93,13 @@ For each `shot_id` in SHOT_IDS:
 
    ```js
    (args) => {
-     const startImgs = [...document.querySelectorAll('img[alt="Uploaded image"], img[alt^="media asset"]')].filter(i => {
+     // Start frame + optional End frame thumbnails (both left-sidebar small images)
+     const allImgs = [...document.querySelectorAll('img[alt="Uploaded image"], img[alt^="media asset"]')].filter(i => {
        const r = i.getBoundingClientRect();
-       return r.x > 20 && r.x < 250 && r.y > 100 && r.y < 400 && r.width > 50 && r.width < 200;
+       return r.x > 20 && r.x < 280 && r.y > 100 && r.y < 450 && r.width > 50 && r.width < 200;
      });
-     const startImgSrc = startImgs[0]?.src || null;
+     const startImgSrc = allImgs[0]?.src || null;
+     const endImgSrc = allImgs[1]?.src || null;   // present only for start_end technique
      const ed = document.querySelector('[contenteditable="true"]');
      const prompt = (ed?.innerText || '').trim();
      const modelBtn = document.querySelector('button[data-component="model"]');
@@ -103,19 +108,22 @@ For each `shot_id` in SHOT_IDS:
      );
      // Kling 3.0 pricing: 1.75 credits per second
      const expected_cost = (args.kling_duration * 1.75).toFixed(2).replace(/\.?0+$/, '');
+     const need_end = !!args.end_image_asset_id;
      return {
        start_frame_attached: !!startImgSrc,
-       start_frame_matches_shot: startImgSrc?.includes(args.image_asset_id) || false,
+       start_frame_matches_shot: startImgSrc?.includes(args.start_image_asset_id) || false,
+       end_frame_state_correct: need_end ? (!!endImgSrc && endImgSrc.includes(args.end_image_asset_id)) : !endImgSrc,
        prompt_matches: prompt.startsWith(args.video_prompt.slice(0, 40)),
        model_is_kling3: /kling\s*3/i.test(modelBtn?.innerText || ''),
        generate_cost_ok: gen?.innerText.includes(expected_cost),
        generate_text: gen?.innerText.trim(),
        expected_cost,
+       need_end,
      };
    }
    ```
 
-   **All five MUST be true.** If any fails:
+   **All six MUST be true** (`end_frame_state_correct` means: for `start_only` shots End frame is EMPTY, for `start_end` shots End frame is ATTACHED with the correct asset). If any fails:
    - Retry the priming step ONCE (re-write localStorage, reload).
    - If still failing, fall back to the SLOW PATH below for this shot only.
    - If slow path also fails, mark `status.video=fail` with reason `"preflight failed: <which check>"`.

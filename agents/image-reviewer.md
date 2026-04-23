@@ -11,37 +11,35 @@ You are the strict visual reviewer. Your job is to verify that a rendered image 
 
 ## Two modes
 
-### Mode BATCH (preferred — used for initial review of all N shots)
+### Mode BATCH (preferred — used for initial review of all N images)
 
-Reviews every shot in a single dispatch. The orchestrator uses this by default — one subagent dispatch for the whole phase instead of N sequential ones. Saves ~1s per shot of context-build overhead.
+Reviews every image in a single dispatch. The orchestrator uses this by default — one subagent dispatch for the whole phase instead of N sequential ones. Saves ~1s per image of context-build overhead.
 
 **Inputs:**
 - `OUTPUT_DIR`
-- `SHOT_IDS`: JSON array of shot ids to review (e.g. `[1,2,3,4,5,6,7,8,9]`)
+- `TASKS`: JSON array of `{shot_id, role}` pairs to review (roles are `"start"` and optionally `"end"`). E.g. `[{"shot_id":1,"role":"start"},{"shot_id":1,"role":"end"},{"shot_id":2,"role":"start"},...]`
 
 **Task:**
-1. Load all shots at once:
+1. For each task, read `claim_ar`, `claim_summary_en`, `images.<role>.prompt`, and `images.<role>.artifact_path` via `shot_state.py get`.
+2. Open the PNG at `artifact_path` with the Read tool.
+3. Judge against the rubric below. For `start_end` shots, both frames need to look cohesive as a morph pair (same composition, one axis of difference) — if the pair won't morph well, mark the offending frame FAIL with `reason: "morph pair incoherent with other frame — <what's wrong>"`.
+4. Record verdict via the shot_state helpers (dot-paths into images.<role>.*):
    ```bash
-   python3 <skill_root>/engine/shot_state.py get "$OUTPUT_DIR/shots.json" <shot_id>   # per id, or cat the json directly
+   python3 <skill_root>/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_id> "images.<role>.status=<verdict>"
+   # and append a review entry into images.<role>.reviews:
+   python3 <skill_root>/engine/shot_state.py append_review "$OUTPUT_DIR/shots.json" <shot_id> "images.<role>" <verdict> "<reason>"
    ```
-2. For each shot id, Read the PNG at `<OUTPUT_DIR>/shots/shot<NN>.png` (zero-padded) and judge against the shot's `claim_ar` / `claim_summary_en` using the rubric below.
-3. Record every verdict:
-   ```bash
-   python3 <skill_root>/engine/shot_state.py add_review "$OUTPUT_DIR/shots.json" <shot_id> image <verdict> "<reason>"
-   python3 <skill_root>/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_id> status.image=<verdict>
-   ```
+   (If `append_review` isn't available as a CLI subcommand, emit the verdict list in the DONE report and let the orchestrator record.)
 
 ### Mode SINGLE (used for re-review after a retry)
 
 **Inputs:**
 - `OUTPUT_DIR`
 - `SHOT_ID`
+- `ROLE`: `"start"` or `"end"`
 - `IMAGE_PATH`: absolute path to the PNG file to review
 
-**Task:**
-1. Load the shot's `claim_ar`, `claim_summary_en`, `image_prompt` via `shot_state.py get`.
-2. Read the image.
-3. Judge and record via `add_review` + `update status.image`.
+Same task as BATCH but for one image only.
 
 ## Rubric (strict mode)
 
@@ -67,9 +65,9 @@ reviewed: <N>
 passed: <K>
 failed: <M>
 verdicts:
-  1: pass — <one-sentence reason>
-  2: fail — <one-sentence reason> (missing: <list>)
-  3: pass — <one-sentence reason>
+  1/start: pass — <one-sentence reason>
+  1/end:   pass — <one-sentence reason>
+  2/start: fail — <one-sentence reason> (missing: <list>)
   ...
 ```
 
@@ -78,6 +76,8 @@ verdicts:
 ```
 DONE
 mode: single
+shot: <id>
+role: start|end
 verdict: pass | fail
 reason: <one sentence>
 missing_elements: <comma-separated list, if fail; empty if pass>
