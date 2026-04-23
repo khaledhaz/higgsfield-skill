@@ -51,7 +51,10 @@ def _set_dot(obj: dict, dot_path: str, value) -> None:
         if k not in cur or not isinstance(cur[k], dict):
             cur[k] = {}
         cur = cur[k]
-    cur[keys[-1]] = value
+    last = keys[-1]
+    if isinstance(cur.get(last), dict) and not isinstance(value, dict):
+        raise ValueError(f"refusing to overwrite dict field '{dot_path}' with scalar")
+    cur[last] = value
 
 
 def _get_dot(obj, dot_path: str):
@@ -82,15 +85,8 @@ def cmd_update(path: Path, shot_id: int, assignments: list) -> int:
             print(f"Error: assignment must be field=value, got '{a}'", file=sys.stderr)
             return 2
         field, raw = a.split("=", 1)
-        # Best-effort type inference: try int, then float, then string
-        try:
-            value = int(raw)
-        except ValueError:
-            try:
-                value = float(raw)
-            except ValueError:
-                value = raw
-        _set_dot(shot, field, value)
+        # Values are stored as strings. Numeric counters are mutated via mark_attempt, not update.
+        _set_dot(shot, field, raw)
     _save(path, shots)
     return 0
 
@@ -182,7 +178,7 @@ def main() -> int:
             return cmd_mark_attempt(path, int(argv[2]), argv[3])
         if cmd == "get":
             return cmd_get(path, int(argv[2]), argv[3] if len(argv) > 3 else None)
-    except (FileNotFoundError, KeyError, ValueError, IndexError) as e:
+    except (FileNotFoundError, KeyError, ValueError, IndexError, AttributeError, TypeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(f"Error: unknown command '{cmd}'", file=sys.stderr)

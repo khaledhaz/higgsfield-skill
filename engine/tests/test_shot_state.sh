@@ -71,4 +71,30 @@ nq=$(python3 "$SS" next_queued "$SF" image)
 [ -z "$nq" ] || { echo "FAIL: next_queued when none queued: got '$nq' (expected empty)"; exit 1; }
 echo "PASS test_shot_state next-queued-none"
 
+# Case 10: update rejects scalar-clobbers-dict
+# (after previous tests ran, shot 1 has a non-empty reviews.image list)
+if python3 "$SS" update "$SF" 1 reviews=garbage 2>/dev/null; then
+  echo "FAIL: update should reject overwriting a dict field with a scalar"
+  exit 1
+fi
+# Verify reviews dict wasn't corrupted
+is_dict=$(python3 -c "import json; d=json.load(open('$SF')); print(isinstance(d[0]['reviews'], dict))")
+[ "$is_dict" = "True" ] || { echo "FAIL: reviews was clobbered despite reject"; exit 1; }
+echo "PASS test_shot_state reject-scalar-over-dict"
+
+# Case 11: update stores numeric-looking strings as strings (no coercion)
+python3 "$SS" update "$SF" 1 image_prompt="007"
+val=$(python3 "$SS" get "$SF" 1 image_prompt)
+[ "$val" = "007" ] || { echo "FAIL: numeric-looking string coerced: got '$val' (expected '007')"; exit 1; }
+echo "PASS test_shot_state no-numeric-coercion"
+
+# Case 12: corrupted reviews field surfaces clean error (no traceback)
+python3 -c "import json; d=json.load(open('$SF')); d[0]['reviews']='not-a-dict'; open('$SF','w').write(json.dumps(d))"
+output=$(python3 "$SS" add_review "$SF" 1 image fail "should fail cleanly" 2>&1 || true)
+echo "$output" | grep -q "^Error:" || { echo "FAIL: expected clean 'Error:' output, got: $output"; exit 1; }
+echo "$output" | grep -q "Traceback" && { echo "FAIL: traceback leaked instead of clean error"; exit 1; }
+echo "PASS test_shot_state clean-error-on-corruption"
+# Restore reviews to a dict so later test iterations don't break (in case this file is re-run)
+python3 -c "import json; d=json.load(open('$SF')); d[0]['reviews']={'image':[],'video':[]}; open('$SF','w').write(json.dumps(d))"
+
 echo "ALL PASSED: shot_state"
