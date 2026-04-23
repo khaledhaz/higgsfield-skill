@@ -58,7 +58,8 @@ awk -v a="$dur" 'BEGIN { exit (a >= 5.8 && a <= 6.2) ? 0 : 1 }' || {
 }
 echo "PASS test_stitch concat ($dur s)"
 
-# Test 2: concat with VO overlay
+# Test 2: concat with VO overlay — total video (6s) equals VO (6s), so output
+# should be vo_duration + default tail_pad 1.0s = 7.0s.
 cat > "$TMP_DIR/manifest2.json" <<EOF
 {
   "output": "$TMP_DIR/out2.mp4",
@@ -79,10 +80,69 @@ EOF
 "$STITCH" "$TMP_DIR/manifest2.json"
 
 [ -f "$TMP_DIR/out2.mp4" ] || { echo "FAIL test_stitch vo: out2.mp4 missing"; exit 1; }
-# Verify there's an audio stream in the output
 has_audio=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of default=nw=1:nk=1 "$TMP_DIR/out2.mp4" 2>/dev/null || true)
 [ "$has_audio" = "audio" ] || { echo "FAIL test_stitch vo: no audio stream in output"; exit 1; }
-echo "PASS test_stitch vo-overlay"
+# Default tail_pad=1.0 → output duration must be ~7.0s (6s VO + 1s tail)
+dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$TMP_DIR/out2.mp4")
+awk -v a="$dur" 'BEGIN { exit (a >= 6.9 && a <= 7.2) ? 0 : 1 }' || {
+  echo "FAIL test_stitch vo-overlay: expected ~7s total (6 VO + 1 tail), got $dur"
+  exit 1
+}
+echo "PASS test_stitch vo-overlay-default-pad ($dur s)"
+
+# Test 2b: VO LONGER than video — video track must freeze-frame pad so the
+# full VO plays out. Use a 10s VO but only 6s of clips.
+if [ ! -f "$FIX_DIR/silent-10s.mp3" ]; then
+  ffmpeg -y -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=48000" \
+    -t 10 -c:a libmp3lame -q:a 4 "$FIX_DIR/silent-10s.mp3" 2>/dev/null
+fi
+cat > "$TMP_DIR/manifest2b.json" <<EOF
+{
+  "output": "$TMP_DIR/out2b.mp4",
+  "resolution": [1920, 1080],
+  "fps": 24,
+  "clips": [
+    {"path": "$FIX_DIR/clip-red.mp4", "type": "shot"},
+    {"path": "$FIX_DIR/clip-green.mp4", "type": "shot"},
+    {"path": "$FIX_DIR/clip-blue.mp4", "type": "shot"}
+  ],
+  "vo": {"path": "$FIX_DIR/silent-10s.mp3"},
+  "cut_xfade": 0
+}
+EOF
+
+"$STITCH" "$TMP_DIR/manifest2b.json"
+
+dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$TMP_DIR/out2b.mp4")
+awk -v a="$dur" 'BEGIN { exit (a >= 10.9 && a <= 11.2) ? 0 : 1 }' || {
+  echo "FAIL test_stitch vo-longer: expected ~11s (10 VO + 1 tail), got $dur (VO must not be truncated)"
+  exit 1
+}
+echo "PASS test_stitch vo-longer-than-video-pad-freeze-frame ($dur s)"
+
+# Test 2c: explicit tail_pad override = 0 → output duration exactly equals VO
+cat > "$TMP_DIR/manifest2c.json" <<EOF
+{
+  "output": "$TMP_DIR/out2c.mp4",
+  "resolution": [1920, 1080],
+  "fps": 24,
+  "clips": [
+    {"path": "$FIX_DIR/clip-red.mp4", "type": "shot"},
+    {"path": "$FIX_DIR/clip-green.mp4", "type": "shot"},
+    {"path": "$FIX_DIR/clip-blue.mp4", "type": "shot"}
+  ],
+  "vo": {"path": "$FIX_DIR/silent-6s.mp3", "tail_pad": 0},
+  "cut_xfade": 0
+}
+EOF
+
+"$STITCH" "$TMP_DIR/manifest2c.json"
+dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$TMP_DIR/out2c.mp4")
+awk -v a="$dur" 'BEGIN { exit (a >= 5.9 && a <= 6.2) ? 0 : 1 }' || {
+  echo "FAIL test_stitch tail_pad=0: expected ~6s, got $dur"
+  exit 1
+}
+echo "PASS test_stitch tail_pad-override-zero ($dur s)"
 
 # Test 3: per-clip duration trimming (each source clip is 2s; trim to 1.3s so
 # total ≈ 3 × 1.3 = 3.9s instead of 6s)

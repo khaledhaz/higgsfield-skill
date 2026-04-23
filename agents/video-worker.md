@@ -54,9 +54,13 @@ For each `shot_id` in SHOT_IDS:
    **Derive Kling duration** from the float `shot.duration`:
    ```python
    # Kling 3.0 accepts integers 3..15 seconds
-   kling_duration = max(3, min(15, round(shot.duration)))
+   is_last_shot = (shot.id == max_shot_id)
+   tail_pad = 1 if is_last_shot else 0   # last shot gets +1s buffer in case VO runs past video
+   kling_duration = max(3, min(15, round(shot.duration) + tail_pad))
    ```
-   So a 4.74s shot renders at 5s, a 6.46s shot renders at 6s, an 11.3s shot renders at 11s. The stitcher trims every clip back to the exact float `duration` before concat, so the final cut matches the VO alignment precisely.
+   So a 4.74s shot renders at 5s, a 6.46s shot renders at 6s, an 11.3s shot renders at 11s. **The final shot always gets +1s extra**: if the VO ends at 91.92s and the last shot covers 81.78–91.92s (duration 10.14s), the worker requests 11s from Kling so the final cut has 1s of tail material. If the VO overruns the stitched video, the stitcher freeze-frame-pads the last frame to cover it — but the extra Kling second keeps that transition from looking like a jump-cut into stillness.
+
+   The stitcher trims every NON-last clip to its exact float `shot.duration`. The LAST clip's `duration` in the manifest is set to `null` (omitted) so it plays at its full Kling length, then the stitcher freeze-frame pads (if still short of VO + tail_pad) and forces the output to `vo_duration + tail_pad` (default 1.0s).
 
 2. `browser_tabs` action=select, index=$TAB_INDEX.
 3. Prime BOTH localStorage stores + reload (atomic):

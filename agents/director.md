@@ -37,7 +37,8 @@ Default heuristic — **but override it when the claim wants it**:
 Constraints:
 - `sum(shot.duration) === VO_DURATION` exactly (to 0.01s). Shot boundaries must tile the VO.
 - Each shot's `beat_ids` must be a contiguous subset of beats that the shot covers temporally.
-- No shot shorter than 3s or longer than 15s (Kling render range).
+- No shot shorter than 3s or longer than 15s (Kling render range — but note the +1s tail rule below may push the last shot's Kling render up to 15s).
+- **Last-shot tail rule**: the final shot's Kling duration is computed as `round(last_shot.duration) + 1` (clamped to ≤15). Don't set the last shot's `duration` above 14s, or the +1s bump will exceed Kling's 15s cap. If the VO's final claim would naturally run 14.5s, split it into two shots instead.
 
 ### 2. Per-shot technique
 

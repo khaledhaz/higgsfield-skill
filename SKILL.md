@@ -167,24 +167,34 @@ Notes:
 
 ### Phase 6 — Stitch
 
-Write `manifest.json`. For each clip include `path` AND the exact float `duration` from `shots.json` — the stitcher trims every clip with `-t $duration` before concat, so the final video track aligns to VO word timings precisely:
+Write `manifest.json`. Two important rules:
+
+1. For **all non-last clips**, include `path` AND the exact float `duration` from `shots.json` — the stitcher trims with `-t $duration` so the final video track aligns to VO word timings precisely.
+2. For the **LAST clip**, OMIT the `duration` field (or set to `null`) so the clip plays at its full natural Kling length. The last shot was rendered with an extra +1s of Kling duration specifically to provide tail material in case the VO runs past the stitched video.
+3. Optionally set `vo.tail_pad` (default `1.0`). The stitcher forces the output duration to `vo_duration + tail_pad`:
+   - If stitched video < target: freeze-frame pads the last frame to fill.
+   - If stitched video > target: trims to target.
+   - VO is silence-padded to target — the VO is NEVER truncated.
 
 ```json
 {
   "output": ".../final.mp4",
   "resolution": [1280, 720],
   "fps": 24,
-  "vo": {"path": ".../vo.mp3"},
+  "vo": {"path": ".../vo.mp3", "tail_pad": 1.0},
   "cut_xfade": 0,
   "clips": [
     {"type": "video", "path": ".../clips/clip01.mp4", "duration": 9.48},
     {"type": "video", "path": ".../clips/clip02.mp4", "duration": 12.92},
-    ...
+    {"type": "video", "path": ".../clips/clip03.mp4", "duration": 27.58},
+    {"type": "video", "path": ".../clips/clip04.mp4"}
   ]
 }
 ```
 
-Run `engine/stitch.sh manifest.json`. Capture the printed duration; it should equal VO duration ±0.2s.
+(Above: clip04 is the last shot — no `duration` set, so stitcher uses its natural Kling length, then freeze-frame-pads if still short of target.)
+
+Run `engine/stitch.sh manifest.json`. Capture the printed duration; it should equal `vo_duration + tail_pad` (typically VO + 1.0s) exactly.
 
 ### Phase 7 — Finalize
 

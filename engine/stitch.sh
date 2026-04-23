@@ -6,6 +6,16 @@
 # Per-clip `duration` (seconds, float) in the manifest is honored: each clip
 # is trimmed to that exact duration before concat. Omit the field to use the
 # clip's natural length.
+#
+# VO handling:
+#   - Output duration is forced to `vo_duration + tail_pad` (default tail_pad=1.0s).
+#   - If stitched video track is shorter than target, it is freeze-frame padded
+#     (last frame held via ffmpeg `tpad=stop_mode=clone`) up to target length.
+#   - If stitched video track is longer than target, it is trimmed.
+#   - VO audio is padded with silence up to target length.
+#   - VO is NEVER truncated to match a shorter video track.
+#   - `tail_pad` is configurable via manifest `.vo.tail_pad` (seconds, float);
+#     default 1.0. Set to 0 to output exactly vo_duration.
 
 set -e
 
@@ -24,6 +34,7 @@ res_w=$(jq -r '.resolution[0]' "$manifest")
 res_h=$(jq -r '.resolution[1]' "$manifest")
 fps=$(jq -r .fps "$manifest")
 vo_path=$(jq -r '.vo.path // empty' "$manifest")
+tail_pad=$(jq -r '.vo.tail_pad // 1.0' "$manifest")
 cut_xfade=$(jq -r '.cut_xfade // 0' "$manifest")
 
 # Build list of real (non-cut) clips as path|duration pairs using while-read
@@ -80,10 +91,20 @@ ffmpeg -y -f concat -safe 0 -i "$concat_list" -c copy "$stitched" 2>/dev/null
 # Overlay VO if specified
 if [ -n "$vo_path" ]; then
   [ -f "$vo_path" ] || { echo "Error: VO not found: $vo_path" >&2; exit 1; }
+
+  # Compute durations + target
+  stitched_dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$stitched")
+  vo_dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$vo_path")
+  target=$(awk -v v="$vo_dur" -v p="$tail_pad" 'BEGIN{printf "%.3f", v + p}')
+  video_pad=$(awk -v s="$stitched_dur" -v t="$target" 'BEGIN{p = t - s; if (p < 0) p = 0; printf "%.3f", p}')
+
+  # Freeze-frame pad the video to target, pad VO with silence to target, no -shortest
   ffmpeg -y -i "$stitched" -i "$vo_path" \
-    -map 0:v -map 1:a \
-    -c:v copy -c:a aac -b:a 192k -ar 48000 -ac 2 \
-    -shortest \
+    -filter_complex "[0:v]tpad=stop_mode=clone:stop_duration=${video_pad}[v];[1:a]apad=whole_dur=${target}[a]" \
+    -map "[v]" -map "[a]" \
+    -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p \
+    -c:a aac -b:a 192k -ar 48000 -ac 2 \
+    -t "$target" \
     -movflags +faststart \
     "$output" 2>/dev/null
 else
