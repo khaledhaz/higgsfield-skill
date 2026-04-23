@@ -39,6 +39,11 @@ def update(note_path: Path, region: str, content: str) -> None:
 
     content_rstripped = content.rstrip("\n")
 
+    if open_marker in content_rstripped or close_marker in content_rstripped:
+        raise ValueError(
+            f"content contains region markers for '{region}'; refusing to write"
+        )
+
     if has_open:
         # Replace content between the two markers (first occurrence only)
         pattern = re.compile(

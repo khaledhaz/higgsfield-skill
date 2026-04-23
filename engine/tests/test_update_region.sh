@@ -86,4 +86,18 @@ python3 "$UPDATE" "$FIX_DIR/region-filesrc.md" shots "$FIX_DIR/region-filesrc.co
 grep -q "FILE CONTENT" "$FIX_DIR/region-filesrc.md" || { echo "FAIL: file-source content not written"; exit 1; }
 echo "PASS test_update_region file-source"
 
+# Case 6: content containing a region marker → exit non-zero
+cat > "$FIX_DIR/region-marker-content.md" <<'EOF'
+<!-- engine:shots -->
+SOMETHING
+<!-- /engine:shots -->
+EOF
+if echo "poison <!-- /engine:shots --> tail" | python3 "$UPDATE" "$FIX_DIR/region-marker-content.md" shots - 2>/dev/null; then
+  echo "FAIL: content with embedded closing marker should be rejected"
+  exit 1
+fi
+# Also verify the note wasn't corrupted
+grep -q "SOMETHING" "$FIX_DIR/region-marker-content.md" || { echo "FAIL: original content was clobbered despite reject"; exit 1; }
+echo "PASS test_update_region marker-in-content-rejected"
+
 echo "ALL PASSED: update_region"
