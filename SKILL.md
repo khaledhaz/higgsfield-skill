@@ -90,126 +90,70 @@ The user can manage the cron via `CronList` / `CronDelete` (builtin tools).
 
 ## Orchestrator playbook (Mode A runtime)
 
-This is the concrete procedure Claude executes when told "run <slug>" (or when a scheduler sweep emits a slug). Follow these steps in order. Each step is one action.
-
-### Pre-flight
-1. **Ensure vault exists in the current working folder**: `bash ~/.claude/skills/higgsfield/engine/init_vault.sh` — idempotent. Creates `$PWD/hf-projects/{Projects,_templates,_runs}` + the project template. Does NOT ask the user. Each working folder gets its own vault automatically.
-2. `bash ~/.claude/skills/higgsfield/engine/preflight.sh` — cleans stale SingletonLock (trap #20).
-3. `cd ~/.claude/skills/higgsfield && git log --oneline -20` — include recently-learned auto-edits in your working context.
-
-**Vault-location rule**: always resolve paths relative to the CURRENT working folder (`$PWD`) — never a hardcoded `~/Obsidian/...`. The vault is `$PWD/hf-projects/`. Project notes are `$PWD/hf-projects/Projects/<slug>.md`. Verbose run logs archive to `$PWD/hf-projects/_runs/`.
+You (main Claude session) ARE the orchestrator. Your job is to dispatch subagents, gate phases, and keep the project note in sync.
 
 ### Phase 0 — Intake
-1. Resolve slug: `NOTE=$PWD/hf-projects/Projects/<slug>.md`.
-2. Parse frontmatter: `python3 ~/.claude/skills/higgsfield/engine/parse_frontmatter.py "$NOTE"`.
-3. Branch on `status`:
-   - `inbox` → proceed.
-   - `active` → crash detected. Read execution log; find the last line with `[x]`; resume from the first non-done phase. If no `[x]` lines exist, start from Phase 0.
-   - `paused` → read `## Questions` section; if a `### A:` answer follows the last `### Q:`, proceed (treat the answer as current-turn input). Otherwise exit with a message.
-   - `done` / `failed` → refuse (explain how to restart).
-   - `scheduled` → refuse (wait for cron).
-4. Flip status: `python3 ~/.claude/skills/higgsfield/engine/update_status.py "$NOTE" active`.
-5. Create output dir: `mkdir -p $PWD/hf-outputs/<slug>`.
-6. Append to log: `[x] <ISO-timestamp> Phase 0 intake: status=active, output=<dir>`.
 
-### Phase 1 — VO (skip if `vo` is null)
-1. `browser_navigate` to `/audio`.
-2. Set Voiceover use-case, model = `vo.model` (default `eleven-v3`), voice = `vo.voice`, paste `vo.script`.
-3. Read waveform `mm:ss` estimate from DOM (pre-gen).
-4. Click Generate.
-5. Wait until audio is ready; extract MP3 CDN URL.
-6. `curl -sL -o $PWD/hf-outputs/<slug>/vo.mp3 <url>`.
-7. `ACTUAL=$(bash ~/.claude/skills/higgsfield/engine/probe_duration.sh $PWD/hf-outputs/<slug>/vo.mp3)`.
-8. If `|actual - estimate| > 0.5`, log the drift.
-9. Append to log: `[x] Phase 1 VO ✅ · <model>/<voice> · <actual>s · <cost>cr`.
+When the user invokes "run `<slug>`":
+1. Run `engine/preflight.sh` to clear any stale Chrome lock.
+2. Run `engine/init_vault.sh` (idempotent).
+3. Parse frontmatter of `$PWD/hf-projects/Projects/<slug>.md` with `engine/parse_frontmatter.py`.
+4. Verify `status` is `active`, `inbox`, or `scheduled`. Set it to `active` via `engine/update_status.py`.
+5. Ensure `$PWD/hf-outputs/<slug>/` exists; create if missing.
 
-### Phase 2 — Plan
-1. If `shots:` frontmatter is non-empty → skip (respect pre-populated plan).
-2. Otherwise, plan N shots to fit the VO duration (default 5s shots) + M transitions per `transitions.mode`.
-3. If shot-count ambiguity detected:
-   - Append `### Q: <question>` under `## Questions`.
-   - `python3 ... update_status.py "$NOTE" paused`.
-   - Append to log and exit with a message.
-4. Write the plan back into `shots:` frontmatter (edit the note file).
-5. Append to log: `[x] Phase 2 plan: N shots + M transitions, total Ns`.
+### Phase 1 — VO synthesis
 
-### Phase 3 — Images (parallel)
-1. Worker count = `min(len(shots), 6)`.
-2. For each shot, in turn (sequential driver):
-   - `browser_tabs action=new` → tab on `/ai/image?model=nano-banana-pro`.
-   - Via `browser_evaluate`: clear leftover state, set aspect=frontmatter `aspect`, resolution=`2K`, batch=1, **verify Unlimited toggle ON** (trap #22).
-   - Type shot prompt.
-   - Click Generate; verify new history row appeared.
-3. Wait for all N jobs to complete (poll history rows for CDN URLs).
-4. Fan out downloads using parallel `Agent` subagents (up to 6 in one message) — see "Subagent dispatch patterns" below.
-5. Fan out vision QC using parallel `Agent` subagents (one per shot).
-6. On QC FAIL → retry up to 3 attempts per shot (tighten prompt → re-submit → re-QC).
-7. Log per shot: `[x] Phase 3 shot <n> image ✅ (attempt <k>) · ...`.
+Produce `vo.mp3` using Eleven v3 with the voice named in frontmatter. Overwrite existing if present. Cost: ~2 credits/minute. Log the result in the `<!-- engine:begin --> ... <!-- engine:end -->` block.
 
-### Phase 4 — Videos (parallel, Kling 3.0)
-Same shape as Phase 3, but:
-- Tabs on Kling 3.0 video composer.
-- Upload each shot's PNG to Start frame.
-- Set duration per shot via the hidden `<input type="range">` helper (trap #21).
-- Type motion prompt.
-- Generate → download → QC-loop (vision-check first/mid/last frame against source image + implied motion).
+### Phase 2 — VO analysis (dispatch `vo-analyst`)
 
-### Phase 5 — Transitions (parallel, only if `transitions.seamless_pairs`)
-1. For each pair `(A, B)`, fan out frame extraction: `Agent` → `bash .../extract_frames.sh shotA.mp4 shotB.mp4 /tmp/t-<i>/`.
-2. For each extracted pair, dispatch a Kling 3.0 Start+End-frame job (duration 3s, Hollywood pattern from W11).
-3. Download + QC each transition.
+Write the script text from frontmatter's `vo.script` field to `$OUTPUT_DIR/script.txt`. Dispatch the `vo-analyst` subagent with `VAULT_DIR`, `OUTPUT_DIR`, `SCRIPT_PATH`. On `DONE`, read `beats.json`, render a markdown table, and update the note's `<!-- engine:beats -->` region via `engine/update_region.py`.
+
+### Phase 3 — Prompt planning (dispatch `prompt-writer` in INIT mode)
+
+Extract the `## Style notes` section from the note body. Dispatch `prompt-writer` with `OUTPUT_DIR`, `BEATS_PATH`, `SCRIPT_PATH`, `STYLE_NOTES`, `ASPECT`. On `DONE`, read `shots.json`, render a markdown table, update `<!-- engine:shots -->`.
+
+### Phase 4 — Images (dispatch 3× `image-worker` + `image-reviewer` loop)
+
+1. Compute worker assignments: round-robin `shot_ids` across 3 workers (worker 0 gets ids `[1,4,7,...]`, etc.).
+2. Open 3 tabs in Chrome (open new tabs via `mcp__playwright__browser_tabs action=new` twice after the default tab).
+3. Dispatch 3 `image-worker` subagents in parallel (single `Agent` call with 3 tool uses). Wait for all three to report DONE.
+4. For each shot with `status.image == rendered`, dispatch `image-reviewer` (serially — the reviewer has no browser contention).
+5. For each FAIL verdict with `attempts.image < retries_per_shot`:
+   - Dispatch `prompt-writer` in RETRY mode with the reviewer's `reason` and `missing_elements`.
+   - Enqueue the shot again by setting `status.image=queued`.
+6. Re-assign queued shots to workers (same round-robin) and re-dispatch. Repeat until all shots PASS or hit the retry cap.
+7. For any shot that hits the cap with no PASS: write to the note's `## Questions` section ("Shot N image exhausted retries; last reason: `<reason>`. Accept attempt K (`shots/shotNN_kK.png`), edit prompt, or skip?"), set `status.image=escalated`, and pause until the user responds.
+8. When all shots `status.image == pass`, update `<!-- engine:shots -->` table and move on.
+
+### Phase 5 — Videos (dispatch 3× `video-worker` + `video-reviewer` loop)
+
+Mirrors Phase 4 but for Kling 3.0 animations. Depends on all shots having `status.image == pass`. Reviewer samples 3 frames and judges motion + continuity.
 
 ### Phase 6 — Stitch
-1. Build `manifest.json` in-context (Claude writes JSON). Schema from parent spec §12 App D.
-2. `bash ~/.claude/skills/higgsfield/engine/stitch.sh $PWD/hf-outputs/<slug>/manifest.json`.
-3. Verify final MP4 exists and duration is within tolerance of planned total.
-4. Log: `[x] Phase 6 stitch ✅ · final <s>s · <MB>`.
+
+Write `manifest.json` with the approved clip paths in shot order, `resolution: [1280, 720]`, `fps: 24`, `vo.path` pointing to `vo.mp3`, `cut_xfade: 0`. Run `engine/stitch.sh manifest.json`. Capture the printed duration; it should equal VO duration ±0.2s.
 
 ### Phase 7 — Finalize
-1. Any `[!]` in log → `partial`; otherwise → `done`. `python3 ... update_status.py "$NOTE" <final>`.
-2. Fill `## Outputs` section with wiki-links to shot PNGs, shot MP4s, transitions, final MP4.
-3. Archive verbose run log: `cp $NOTE $PWD/hf-projects/_runs/<slug>-<timestamp>.md`.
-4. If any auto-edits landed during the run, append commit hashes + summaries to `## Auto-edits made during this run`.
-5. `browser_close` — free Chrome.
-6. Print completion summary.
 
-### Subagent dispatch patterns
+Fill the `## Outputs` section with paths and credits. Set `status: done`. Commit any auto-learn discoveries from this run per the "Self-learning rules" section below.
 
-Use parallel `Agent` subagents for LOCAL work only (they cannot safely share the browser). Cap fan-out at 6 per batch. Prefer model=`haiku` for mechanical work.
+### Pausing on escalation
 
-**Batch download** (after all N video CDN URLs are known):
-```
-Agent(description="Download shots 1-3", model="haiku",
-      subagent_type="general-purpose",
-      prompt="Run: curl -sL <url1> -o shot1.mp4; curl -sL <url2> -o shot2.mp4; curl -sL <url3> -o shot3.mp4. Report downloaded filenames + sizes.")
-Agent(description="Download shots 4-6", model="haiku", ...)
-```
-Two dispatches in one message → parallel.
+When a shot escalates (retry cap hit), post a numbered question to `## Questions`, set the shot's `status.<stage>=escalated`, and reload the note every ~30s watching for a user reply. Accepted forms:
+- `accept shot N attempt K` → use `shots/shotNN_kK.png` as final, mark `pass`
+- `skip shot N` → remove from final cut, rebalance timings by stretching adjacent shots
+- `edit prompt: <new prompt>` → update shot's `image_prompt` / `video_prompt`, reset `status=queued`, resume
 
-**Vision QC fan-out** (after all downloads):
-```
-Agent(description="QC shot 1", model="haiku",
-      subagent_type="general-purpose",
-      prompt="Read $PWD/hf-outputs/<slug>/shot1.png. Prompt was: <prompt>. Check ≥4 of these elements are visible: <top-5 head-nouns + color-grade cues>. Report {status: PASS|FAIL, missing: [...], suggested_retry_prompt: <text if FAIL>}.")
-# ... one per shot, up to 6 parallel
-```
+### Agent dispatch template
 
-**Frame extraction fan-out** (Phase 5 prep):
-```
-Agent(description="Extract frames for transitions 1-2", model="haiku",
-      subagent_type="general-purpose",
-      prompt="Run: bash ~/.claude/skills/higgsfield/engine/extract_frames.sh shot1.mp4 shot2.mp4 /tmp/t1/; bash ... shot2.mp4 shot3.mp4 /tmp/t2/. Report OK/ERR per extraction.")
-```
+When dispatching a subagent, include:
+- `SKILL_ROOT=/Users/khaled/.claude/skills/higgsfield`
+- `VAULT_DIR=$PWD/hf-projects`
+- `OUTPUT_DIR=$PWD/hf-outputs/<slug>`
+- Any agent-specific params (see `agents/<name>.md` for the exact Input section)
 
-### Browser lifecycle
-- Pre-flight `preflight.sh` at run start.
-- Keep browser alive across phases of the same project.
-- `browser_close` at the end of every project (done, partial, failed, or paused).
-
-### Pause / resume (exit-cleanly semantics)
-- When a phase detects spec ambiguity → write `### Q:` block → `update_status.py paused` → `browser_close` → print a clear instruction ("Pause on <reason>. Answer with `### A:` in the Questions section of `<note>`, then re-invoke 'run <slug>'") → exit the current orchestration.
-- The session does NOT poll the note for an answer. User re-invokes when ready.
-- Mode D cron sweeps skip paused projects until their `### A:` has been added AND status has been manually flipped back to `scheduled` (user's deliberate action — the cron does not auto-resume paused projects).
+Always pass SKILL_ROOT so subagents can invoke engine scripts without path guessing.
 
 ## Self-learning rules (skill auto-edit)
 
