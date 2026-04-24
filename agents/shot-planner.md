@@ -23,14 +23,22 @@ You do NOT invent visual concepts, pick cinematic techniques, or write prompts. 
 
 ### Step 1 — Load both files
 
+`claims.json` is an OBJECT with `continuity_notes` (string) at the root and `claims` (array). `beats.json` is a bare array. Load via Python so you can capture both pieces of `claims.json`:
+
 ```bash
-CLAIMS=$(cat "$CLAIMS_PATH")
+CLAIMS_DOC=$(cat "$CLAIMS_PATH")          # full {continuity_notes, claims} object as JSON text
 BEATS=$(cat "$BEATS_PATH")
+# Inside Python:
+#   doc = json.loads(CLAIMS_DOC)
+#   claims = doc["claims"]
+#   continuity_notes = doc.get("continuity_notes", "")
 ```
 
 Expected shapes:
-- `claims.json`: array of `{claim_id, claim_ar, claim_summary_en, visual_concept, cinematic_technique, technique, concept_prompt_start, concept_prompt_end, video_prompt, creative_intent, estimated_duration_class, groupable_with_next}`
-- `beats.json`: array of `{id, claim_ar, start, end, duration, confidence}`
+- `claims.json`: `{"continuity_notes": "<string>", "claims": [<claim object>, ...]}`. Each claim object has `{claim_id, claim_ar, claim_summary_en, visual_concept, cinematic_technique, technique, concept_prompt_start, concept_prompt_end, video_prompt, creative_intent, estimated_duration_class, groupable_with_next, reference_images}`.
+- `beats.json`: array of `{id, claim_ar, start, end, duration, confidence}`.
+
+You will copy `continuity_notes` verbatim into `shots.json` root in Step 6 — the image-reviewer reads it from there during BATCH_PICK.
 
 ### Step 2 — Map claims to beats (fuzzy text match)
 
@@ -116,10 +124,16 @@ For `start_end` shots, `images` has both `start` and `end` keys. Each carries it
 
 ### Step 6 — Write outputs
 
-1. **`shots.json`** — atomic write via shot_state.py init:
+1. **`shots.json`** — atomic write via shot_state.py init (bare array of shot objects, unchanged shape):
    ```bash
    python3 $SKILL_ROOT/engine/shot_state.py init "$OUTPUT_DIR/shots.json" "$(python3 -c "import json,sys; print(json.dumps(SHOTS))")"
    ```
+
+1b. **`continuity_notes.txt`** — write the package-wide `continuity_notes` string from `claims.json` root to a sibling text file. The image-reviewer reads it during BATCH_PICK to cross-check shots against the package's continuity anchors. Keeps `shots.json` shape untouched (bare array — `shot_state.py` operations remain unchanged).
+   ```bash
+   python3 -c "import json; print(json.loads(open('$CLAIMS_PATH').read()).get('continuity_notes',''))" > "$OUTPUT_DIR/continuity_notes.txt"
+   ```
+   If `continuity_notes` is empty or missing, write an empty file — the image-reviewer treats empty as "no continuity anchors set" and skips the cross-check.
 
 2. **Markdown table** — append to the existing `director_notes.md` (written by Creative Director) with an appended "Shot Planner output" section showing the timing mapping:
    ```markdown
@@ -153,6 +167,7 @@ duration_delta: <abs(total_duration - VO_DURATION), must be ≤0.01>
 last_shot_duration: <float — must be ≤14.0 for tail-pad safety>
 techniques: {"synecdoche": 2, ...}
 fuzzy_match_low_confidence: <count of claim→beat mappings that fell back to proportional allocation>
+continuity_notes_propagated: <Y/N — non-empty continuity_notes.txt sibling file written>
 ```
 
 ## Never
