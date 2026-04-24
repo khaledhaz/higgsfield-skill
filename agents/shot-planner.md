@@ -90,6 +90,7 @@ For each shot, combine the Creative Director's creative fields with your timing 
       "prompt": null,
       "reference_urls": "<same as claim.reference_urls_start, or [] if missing>",
       "research_notes": "<same as claim.research_notes_start, or empty string>",
+      "reference_images": "<same as claim.reference_images, or [] if missing — CD-picked files, NOT the researcher's candidate list>",
       "variants": [],
       "selected_variant": null,
       "status": "queued",
@@ -107,7 +108,7 @@ For each shot, combine the Creative Director's creative fields with your timing 
 }
 ```
 
-For `start_end` shots, `images` has both `start` and `end` keys. Each carries its own `concept_prompt` (from the matching claim field) + `reference_urls` + `research_notes` + an empty `variants` array.
+For `start_end` shots, `images` has both `start` and `end` keys. Each carries its own `concept_prompt` (from the matching claim field) + `reference_urls` + `research_notes` + an empty `variants` array. **Both `start` and `end` share the same `reference_images` list** — a morph needs a consistent visual anchor at both endpoints. Copy `claim.reference_images` into BOTH image slots unchanged.
 
 **Round 3 variant-based schema**: each image role's `variants` is initialized empty — the image-worker populates it with 2 entries (since `batch_size=2` generates 2 variants per submit). The image-reviewer later sets `selected_variant` to 0 or 1. All downstream consumers (video-worker, stitch, etc.) read `images.<role>.variants[selected_variant].artifact_asset_id` to get the chosen result. There is NO top-level `artifact_path` / `artifact_asset_id` field — everything lives inside variants.
 
@@ -162,3 +163,4 @@ fuzzy_match_low_confidence: <count of claim→beat mappings that fell back to pr
 - Never produce a shot <3s or >15s.
 - Never re-assign `cinematic_technique` to create variety; the Creative Director already enforced the variety rule. If claims happen to all share one technique, report it — don't silently rewrite.
 - Never write your own prompts. Pure passthrough of Creative Director output into shot records.
+- Never split `claim.reference_images` unevenly across a morph's `start` and `end` slots. Both must carry the same list.
