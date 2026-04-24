@@ -34,10 +34,13 @@ IMPORTANT: This research is for YOUR reference understanding only. You NEVER mod
 
 ### Step 2 — Element extraction (per claim)
 
-Load `claims.json`:
+Load `claims.json` (root is an OBJECT, not a bare array — the Creative Director writes `{continuity_notes: "...", claims: [...]}`). Extract the claims list:
+
 ```bash
-CLAIMS=$(cat "$CLAIMS_PATH")
+CLAIMS=$(python3 -c "import json,sys; print(json.dumps(json.loads(open('$CLAIMS_PATH').read())['claims'], ensure_ascii=False))")
 ```
+
+You do NOT need to read `continuity_notes` — that's for the image-reviewer downstream. You only enrich per-claim concept text.
 
 Process only claims whose `claim_id` falls within `[CLAIM_RANGE[0], CLAIM_RANGE[1]]` inclusive. Do not touch any claim outside that range — your sibling researcher owns those.
 
@@ -115,12 +118,13 @@ When a concept_prompt includes people from or in a specific country:
 
 ### Step 5 — Write results back into claims.json (atomic)
 
-After enriching a claim, write the updated fields directly into the claims.json in-place. Use atomic read-modify-write — load the full array, mutate your claim's fields, save the full array back:
+After enriching a claim, write the updated fields directly into the claims.json in-place. Use atomic read-modify-write — load the full document (an object with `continuity_notes` and `claims`), mutate the target claim inside `data["claims"]`, save the full document back. Preserve `continuity_notes` exactly as the CD wrote it.
 
 ```python
 import json, pathlib
 path = pathlib.Path(CLAIMS_PATH)
-claims = json.loads(path.read_text())
+data = json.loads(path.read_text())
+claims = data["claims"]   # mutate this list in-place; data still wraps it
 
 # Find your claim by id, update fields
 for c in claims:
@@ -139,13 +143,13 @@ for c in claims:
             c["reference_images_end"] = local_paths_end
         break
 
-# Atomic write via tempfile + rename
+# Atomic write via tempfile + rename — write the FULL DOCUMENT back, not just claims.
 tmp = path.with_suffix(".tmp")
-tmp.write_text(json.dumps(claims, ensure_ascii=False, indent=2))
+tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 tmp.rename(path)
 ```
 
-**Race-safety note**: two researchers may be writing to the same file concurrently, but since each owns a disjoint `CLAIM_RANGE` and the whole-file read-modify-write is serialized by the OS rename (POSIX atomic on same filesystem), the last writer wins without losing anyone's edits — IF each writer reads the file fresh before mutating. Do read-modify-write in one tight sequence; do NOT hold stale state between operations. If you're about to write claim X and your sibling already enriched claims outside X, the whole array you loaded already contains their edits — you don't overwrite them.
+**Race-safety note**: two researchers may be writing to the same file concurrently, but since each owns a disjoint `CLAIM_RANGE` and the whole-file read-modify-write is serialized by the OS rename (POSIX atomic on same filesystem), the last writer wins without losing anyone's edits — IF each writer reads the file fresh before mutating. Do read-modify-write in one tight sequence; do NOT hold stale state between operations. If you're about to write claim X and your sibling already enriched claims outside X, the whole document you loaded already contains their edits — you don't overwrite them. The `continuity_notes` field at the document root is also preserved by writing `data` (not `claims`) back.
 
 Also write a research log for the project at `$OUTPUT_DIR/research_log.md` (derive `OUTPUT_DIR` as the directory containing `CLAIMS_PATH`):
 
