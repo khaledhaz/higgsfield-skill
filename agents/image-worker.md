@@ -99,69 +99,78 @@ FULL_PROMPT="$CONCEPT, $STYLE"
 
 Re-verify after fill.
 
-### Check 5 — Reference images (skip if empty)
+### Check 5 — Reference images
+
+Model: **clear every chip at the start of check 5, then upload exactly the files this task needs.** No provenance tracking, no timestamp bookkeeping, no "is this chip stale" logic. Clean slate on every task. The cost is re-uploading a ref that happens to appear on consecutive tasks (~2s), which is cheap and worth the simplicity.
 
 Load the required set:
 
 ```bash
-REFS=$(python3 "$SKILL_ROOT/engine/shot_state.py" get "$SHOTS_PATH" $SHOT_ID "images.$ROLE.reference_images")
-# REFS is a JSON array of absolute paths, possibly []
+REFS_JSON=$(python3 "$SKILL_ROOT/engine/shot_state.py" get "$SHOTS_PATH" $SHOT_ID "images.$ROLE.reference_images")
+# REFS_JSON is a JSON array of absolute paths, possibly []
+REFS_COUNT=$(echo "$REFS_JSON" | python3 -c "import json,sys; print(len(json.loads(sys.stdin.read())))")
 ```
 
-If `REFS` parses to `[]`, skip this check — but ALSO remove any stale chips from a prior task:
+**Step 5a — Clear all chips** (runs unconditionally, even when `REFS` is empty):
 
 ```js
-() => {
-  const chips = Array.from(document.querySelectorAll('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14'));
-  chips.forEach(chip => chip.querySelector('button')?.click()); // first button in chip = remove-X
-  return chips.length;
+async () => {
+  // Remove all existing chips by clicking each chip's first button (the X).
+  // The remove-X button is the FIRST <button> inside each chip — svg viewBox="0 0 20 20",
+  // path starts M3.81246. Clicking it unmounts the chip. See trap #23.
+  let removed = 0;
+  for (let iter = 0; iter < 20; iter++) {
+    const chips = Array.from(document.querySelectorAll('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14'));
+    if (chips.length === 0) break;
+    const btn = chips[0].querySelector('button');
+    if (!btn) break;
+    btn.click();
+    removed++;
+    await new Promise(r => setTimeout(r, 150)); // let React unmount
+  }
+  const remaining = document.querySelectorAll('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14').length;
+  return { removed, remaining };
 }
 ```
 
-**Pass** (when `REFS` is non-empty): the number of chips equals `REFS.length`, AND the CDN UUID inside each `img[alt="object image"]` src matches a file we uploaded for this task. Since we can't deterministically know the server-assigned UUID beforehand, a lighter check is enough: chip count equals required count AND no chips predate this task's submission start. Track `ref_upload_ts` per chip: record the time we upload each file, and on re-preflight treat any chip older than the earliest current-task upload as stale.
+Verify `remaining === 0` before moving on. If it isn't (more than 20 chips, or a chip's remove-X is hidden), that's a genuine failure — log it, bump the `refs` retry counter.
 
-**Fix — Remove stale chips** (chips NOT matching any path in the current `REFS`):
+**Step 5b — Attach required refs** (skipped entirely when `REFS_COUNT === 0`):
 
-```js
-(keepCount) => {
-  const chips = Array.from(document.querySelectorAll('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14'));
-  // Keep the youngest `keepCount` chips (most recent uploads); remove the rest.
-  // For the first task of the burst, `keepCount` is 0 (remove all from prior session) before any upload.
-  const toRemove = chips.slice(0, Math.max(0, chips.length - keepCount));
-  toRemove.forEach(chip => chip.querySelector('button')?.click());
-  return { removed: toRemove.length, kept: chips.length - toRemove.length };
-}
-```
+For each path in `REFS` (in order):
 
-Before uploading, call this with `keepCount = 0` to clear the strip. After all uploads, you'll have exactly `REFS.length` chips.
+1. Click the add-more button to trigger the file chooser:
 
-**Fix — Attach new references**:
-
-For each path in `REFS`:
-
-1. Click the add-more button to open the file chooser:
    ```js
    () => {
-     // The add-more button is at the end of the chip strip. It has class "size-full" and
-     // wraps a <label><input type="file" accept="image/..."> — clicking triggers the
-     // native file chooser. It's NOT inside any chip.
+     // Add-more button = the `button.size-full` inside the chip strip that is NOT inside any chip.
+     // It wraps a <label><input type="file" accept="image/jpeg,image/jpg,image/png,image/webp">.
      const strip = document.querySelector('div.flex.items-center.gap-2.flex-wrap');
-     const buttons = Array.from(strip?.querySelectorAll('button.size-full') || []);
-     // The last size-full button that is NOT inside a chip is the add-more button
-     const addMore = buttons.find(b => !b.closest('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14'));
+     if (!strip) return { ok: false, reason: 'chip strip not found' };
+     const addMore = Array.from(strip.querySelectorAll('button.size-full')).find(
+       b => !b.closest('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14')
+     );
      if (!addMore) return { ok: false, reason: 'add-more button not found' };
      addMore.click();
      return { ok: true };
    }
    ```
 
-2. `browser_file_upload paths=["<absolute path from REFS>"]` — Playwright intercepts the native file chooser and sets the file.
+2. `browser_file_upload paths=["<absolute path>"]` — Playwright intercepts the native file chooser.
 
-3. Wait 2s for upload to complete and the new chip to mount.
+3. `browser_wait_for time=2` — let the upload hit the CDN and the chip mount.
 
-4. Verify chip count increased by 1 and the newest `img[alt="object image"]` has a CDN URL (not a blob: URL).
+4. Verify the newest `img[alt="object image"]` has a CDN URL (contains `images.higgs.ai` or `cloudfront.net`), not a `blob:` URL. If still blob after another 2s, treat as upload-still-in-flight and re-check; if still blob after 10s total, upload failed — log and bump `refs` retry counter.
 
-Repeat for each path. Total upload time scales with `REFS.length` — typically 1 file, ~2-3s per file.
+**Step 5c — Pass check**: after 5a + 5b complete without error, count chips one last time:
+
+```js
+() => document.querySelectorAll('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14').length
+```
+
+Pass iff `chip_count === REFS_COUNT`. If not, fail check with observed `chip_count` and expected `REFS_COUNT`; the outer loop bumps the counter and re-runs 5a+5b.
+
+**Upload cost**: ~2-3s per reference. Since `REFS` is capped at 1 per task in Round 4 (see creative-director.md §7), check 5 adds at most ~3s per task with refs. Tasks with empty `REFS` add only the clear-strip cost (~50ms if strip was already empty).
 
 ## Control flow
 
