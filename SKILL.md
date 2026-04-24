@@ -202,7 +202,7 @@ Save as `$OUTPUT_DIR/manifest_template.json`. Phase 5 will fill in clip paths as
 
 ### Phase 4 — Image burst + BATCH_PICK review + BATCH_RETRY (Round 3)
 
-Round 3 collapses the image phase into a single simultaneous burst. Research already ran (Phase 2.6), so every concept_prompt is enriched when Phase 3 finishes. Shot Planner writes `shots.json` with all images `status=queued`. The orchestrator immediately fires N image-workers — one per image task, all in one message — and they prime+reload+click in parallel. `batch_size=2` in localStorage means each submission produces TWO rendered variants. The reviewer picks the better variant per image in a single BATCH_PICK dispatch.
+Round 3 collapses the image phase into a single simultaneous burst. Research already ran (Phase 2.6), so every concept_prompt is enriched when Phase 3 finishes. Shot Planner writes `shots.json` with all images `status=queued`. The orchestrator immediately fires N image-workers — one per image task, all in one message — and they prime+reload+click in parallel. `batch_size=1` in localStorage means each submission produces one rendered image (worker records it as a single-entry `variants` array with `selected_variant=0` pre-set). The variants-array wrapper stays in the schema so downstream consumers (video-worker, stitch) use one stable shape regardless of batch size. The reviewer still runs in BATCH_PICK mode — it just confirms the single variant per image and flips `status=pass`/`fail`.
 
 #### Tab pre-warming (sized to the image count, Round 3)
 
@@ -225,24 +225,24 @@ Tabs warm up in parallel with VO + Creative Director + Whisper + research. By th
    The orchestrator sends N Agent tool calls in a single message. Each worker:
    - Attaches to its pre-warmed tab.
    - Loads the concept+style prompt.
-   - Primes `hf:image-form-upd` + `hf:nano-banana-2-image-form-3` (with `batch_size: 2`).
+   - Primes `hf:image-form-upd` + `hf:nano-banana-2-image-form-3` (with `batch_size: 1`).
    - Reloads, preflights, clicks Generate.
-   - Polls for its 2 variants (by submission timestamp).
-   - Downloads both variants.
-   - Records them as `images.<role>.variants = [{path, uuid}, {path, uuid}]` with `selected_variant=null`.
+   - Polls for the single render (by submission timestamp).
+   - Downloads it.
+   - Records it as `images.<role>.variants = [{path, uuid}]` with `selected_variant=0` (only one to pick).
    - Marks `status=rendered`.
    - Reports DONE.
 
    All N workers click Generate within ~4s of each other. All N renders run server-side simultaneously, completing ~60-90s later.
 
-2. **Wait for all N workers to report DONE** (or fail). Typical wall clock for the burst: ~80-100s. All 2N variants are on disk.
+2. **Wait for all N workers to report DONE** (or fail). Typical wall clock for the burst: ~80-100s. All N images are on disk (one variant each with `batch_size=1`).
 
-3. **Dispatch one BATCH_PICK reviewer** for all N image tasks in one Agent call. The reviewer:
-   - Reads both variants per image.
-   - Evaluates each against the full rubric (visual_concept match, technique compliance, accuracy, count rules).
-   - Picks the better variant (`set_variant <shot_id> <role> <index>`).
-   - Marks `status=pass` (or `fail` if neither variant works).
-   - For `start_end` morph pairs, verifies coherence across the selected start+end variants.
+3. **Dispatch one BATCH_PICK reviewer** for all N image tasks in one Agent call. With `batch_size=1`, there's one variant per image, so BATCH_PICK is effectively a batch review — it confirms the single variant against the rubric and flips status:
+   - Reads the one variant per image (`variants[0]`).
+   - Evaluates against the full rubric (visual_concept match, technique compliance, accuracy, count rules).
+   - Leaves `selected_variant=0` (worker pre-set it); no pick decision needed.
+   - Marks `status=pass` (or `fail` if the variant doesn't meet the rubric).
+   - For `start_end` morph pairs, verifies coherence across the selected start + end variants.
    - Returns a per-task verdict block.
 
    Typical wall clock: ~15-20s (vs N × 5s of stream review in Round 2).

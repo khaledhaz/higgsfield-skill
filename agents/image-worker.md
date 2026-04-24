@@ -1,17 +1,17 @@
 ---
 name: image-worker
-description: Submits ONE NBP 2K Unlimited image generation on Higgsfield via localStorage priming + page reload, then polls for TWO variants (batch_size=2), downloads both, and records them as a variants array in shots.json. One worker per image task for true simultaneous submission. Has a fallback multi-task loop for retry waves.
+description: Submits ONE NBP 2K Unlimited image generation on Higgsfield via localStorage priming + page reload, polls for the single render, downloads it, and records it as a single-entry variants array in shots.json. One worker per image task for true simultaneous submission. Has a fallback multi-task loop for retry waves.
 tools: Bash, Read, Write, mcp__playwright__browser_navigate, mcp__playwright__browser_tabs, mcp__playwright__browser_evaluate, mcp__playwright__browser_snapshot, mcp__playwright__browser_wait_for
 model: haiku
 ---
 
-# Image Worker (Round 3 — one task, batch_size=2)
+# Image Worker (Round 3 — one task, batch_size=1)
 
-You OWN a Chrome tab by index. The orchestrator pre-warmed your tab to `/ai/image?model=nano-banana-pro` with Unlimited ON, 16:9, 2K. You have exactly ONE image task to submit on this dispatch (the initial pass), then poll for TWO variants (because `batch_size=2`), download both, record them as a variants array. Then you're done.
+You OWN a Chrome tab by index. The orchestrator pre-warmed your tab to `/ai/image?model=nano-banana-pro` with Unlimited ON, 16:9, 2K. You have exactly ONE image task to submit on this dispatch, then poll for one render, download it, record it as a single-entry variants array. Then you're done.
 
 **Round 3 behavioral changes from Round 2:**
 - **One task per worker, not a queue**: the orchestrator dispatches N workers for N images, all in one message. Each gets exactly one `(shot_id, role)`. Workers submit in parallel within ~4s of each other.
-- **`batch_size=2`**: each submission produces 2 rendered variants. You download both and record them in `images.<role>.variants` (a 2-entry array). The image-reviewer picks which one is `selected_variant` downstream.
+- **`batch_size=1`**: each submission produces 1 rendered image. You record it in `images.<role>.variants` as a single-entry array and set `selected_variant=0` yourself (there's nothing to pick from). The variants-array wrapper stays in the schema so downstream consumers (video-worker, stitch) always read `variants[selected_variant]` — consistent shape regardless of batch size. If we later raise batch size, only this worker changes.
 - **Fallback multi-task loop** (for retry waves): if the orchestrator hands you a `TASKS` array instead of a single task, loop through them with the rapid-fire pattern from Round 2. The orchestrator uses this only when processing failure retries.
 
 ## Inputs (from dispatch message)
@@ -64,7 +64,7 @@ Single `browser_evaluate`:
   }));
   const modelKey = 'hf:nano-banana-2-image-form-3';
   const cur = JSON.parse(localStorage.getItem(modelKey) || '{}');
-  cur.batch_size = 2;                        // ← Round 3: 2 variants per submit
+  cur.batch_size = 1;                        // single render per submit
   cur.aspect_ratio = args.aspect || '16:9';
   cur.quality = '2k';
   cur.use_unlimited = true;
@@ -106,9 +106,9 @@ python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $SHOT_I
   "images.$ROLE.submitted_at=$SUBMITTED_AT"
 ```
 
-### Step 4 — Poll for TWO variants (~60–90s)
+### Step 4 — Poll for the single render (~60–90s)
 
-Poll every ~10s, up to 120s timeout. Because `batch_size=2`, NBP returns TWO thumbnails for your submission (usually within seconds of each other). Both share a common `submitted_at` timestamp in their filenames (`hf_<TS>_<uuid>_min.webp`) and both will have `ts >= your SUBMITTED_AT`.
+Poll every ~10s, up to 120s timeout. With `batch_size=1`, NBP returns ONE thumbnail for your submission whose filename timestamp is ≥ your `SUBMITTED_AT`.
 
 ```js
 () => {
@@ -117,36 +117,26 @@ Poll every ~10s, up to 120s timeout. Because `batch_size=2`, NBP returns TWO thu
     const m = s.match(/hf_(\d{8}_\d{6})_([a-f0-9-]{36})_min\.webp/);
     return m ? { ts: m[1], uuid: m[2] } : null;
   }).filter(Boolean);
-  // Return all thumbnails with ts >= target
-  return parsed.filter(t => t.ts >= args.target_ts);
+  // Return the first thumbnail with ts >= target
+  return parsed.filter(t => t.ts >= args.target_ts)[0] || null;
 }
 ```
 
-When you have 2 thumbnails matching your submission, proceed. If only 1 appears after 90s (rare — usually both arrive together), continue with 1 variant and log the short batch in the reviews field.
+When the thumbnail appears, proceed.
 
-### Step 5 — Download both variants (~3–5s)
+### Step 5 — Download the render (~2–3s)
 
 ```bash
 NN=$(printf "%02d" $SHOT_ID)
-UUID1=$VARIANT_1_UUID
-UUID2=$VARIANT_2_UUID
-TS1=$VARIANT_1_TS
-TS2=$VARIANT_2_TS
-
 BASE="https://d8j0ntlcm91z4.cloudfront.net/user_<PREFIX>"
-curl -sS -L --retry 3 -o "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.webp" \
-  "$BASE/hf_${TS1}_${UUID1}_min.webp"
-curl -sS -L --retry 3 -o "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.webp" \
-  "$BASE/hf_${TS2}_${UUID2}_min.webp"
-ffmpeg -v error -y -i "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.webp" "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.png"
-ffmpeg -v error -y -i "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.webp" "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.png"
+curl -sS -L --retry 3 -o "$OUTPUT_DIR/shots/shot${NN}_${ROLE}.webp" \
+  "$BASE/hf_${TS}_${UUID}_min.webp"
+ffmpeg -v error -y -i "$OUTPUT_DIR/shots/shot${NN}_${ROLE}.webp" "$OUTPUT_DIR/shots/shot${NN}_${ROLE}.png"
 ```
 
-### Step 6 — Record variants array + status=rendered
+### Step 6 — Record single-entry variants array + status=rendered
 
-Write the variants array into the shot's image slot. Use Python + shot_state.py dot-path updates (because `update` treats dicts carefully, and the variants array must be set atomically as a JSON list, not piecewise).
-
-Easiest: use a short Python helper that reads shots.json, mutates the image slot, and saves atomically:
+Write a single-entry `variants` array into the shot's image slot and auto-set `selected_variant=0` (there's only one variant — no reviewer pick needed to disambiguate):
 
 ```bash
 python3 - <<PY
@@ -158,10 +148,9 @@ for s in shots:
     if s["id"] == $SHOT_ID:
         img = s["images"]["$ROLE"]
         img["variants"] = [
-            {"artifact_path": "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.png", "artifact_asset_id": "$UUID1"},
-            {"artifact_path": "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.png", "artifact_asset_id": "$UUID2"}
+            {"artifact_path": "$OUTPUT_DIR/shots/shot${NN}_${ROLE}.png", "artifact_asset_id": "$UUID"}
         ]
-        img["selected_variant"] = None   # reviewer will set this in BATCH_PICK
+        img["selected_variant"] = 0   # only one variant, pre-selected
         img["status"] = "rendered"
         img["submitted_at"] = None
         break
@@ -171,7 +160,7 @@ tmp.rename(path)
 PY
 ```
 
-If only 1 variant rendered (timeout case), the array has 1 entry; the reviewer only has one option to pick.
+The reviewer still runs (BATCH_PICK mode) — it just evaluates the single variant per image and flips `status=pass`/`fail`. If we later raise `batch_size` to 2 the schema is identical; only this worker needs to change.
 
 ### Step 7 — Report DONE
 
@@ -181,7 +170,7 @@ mode: single
 tab_index: <TAB_INDEX>
 shot_id: <SHOT_ID>
 role: <ROLE>
-variants_downloaded: <1 or 2>
+variants_downloaded: 1
 elapsed_s: <wall clock from step 1 to here>
 ```
 
@@ -209,7 +198,7 @@ mode: single
 tab_index: <idx>
 shot_id: <id>
 role: start|end
-variants_downloaded: 2
+variants_downloaded: 1
 elapsed_s: <n>
 ```
 
@@ -239,8 +228,8 @@ failed: <M>
 - Never clear + retype the prompt via Lexical editor. That's the Round 1 bug source. Use localStorage priming + reload exclusively.
 - Never navigate, click, or read from any tab other than `TAB_INDEX`. Re-call `browser_tabs action=select` whenever you return from a bash command.
 - Never touch the Unlimited toggle mid-poll (only at setup/reload). Toggle flickers are possible but benign during polling.
-- Never set `batch_size` to anything other than 2 in Round 3. batch_size=1 halves your effective pass rate; batch_size=4 doubles review cost.
+- Never set `batch_size` to anything other than 1 without changing this worker's download + variants-array code accordingly (currently tuned for exactly one render per submit).
 - Never skip recording the `variants` array. Downstream consumers (reviewer, video-worker, stitch) read `variants[selected_variant]`, NOT any top-level artifact field.
-- Never set `selected_variant` yourself — that's the reviewer's job in BATCH_PICK mode.
+- With `batch_size=1`, DO set `selected_variant=0` yourself when recording the variant — there's nothing for the reviewer to pick between. (With `batch_size≥2`, leave it `null` and let the reviewer choose in BATCH_PICK.)
 - Never retry a failed shot semantically. The orchestrator + reviewer + prompt-writer loop owns retries.
 - Never modify shots you didn't claim.
