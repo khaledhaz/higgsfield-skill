@@ -96,7 +96,17 @@ def cmd_update(path: Path, shot_id: int, assignments: list) -> int:
             print(f"Error: assignment must be field=value, got '{a}'", file=sys.stderr)
             return 2
         field, raw = a.split("=", 1)
-        # Values are stored as strings. Numeric counters are mutated via mark_attempt, not update.
+        # Values are stored as strings unless they parse as a JSON array or object —
+        # this lets callers update list/dict fields like reference_images=["/a","/b"]
+        # without round-tripping through `init`. Numeric counters are mutated via
+        # mark_attempt, not update; keep them as strings here for back-compat.
+        stripped = raw.strip()
+        if stripped and stripped[0] in "[{":
+            try:
+                _set_dot(shot, field, json.loads(stripped))
+                continue
+            except json.JSONDecodeError:
+                pass  # fall through to string-store
         _set_dot(shot, field, raw)
     _save(path, shots)
     return 0
