@@ -23,6 +23,8 @@ You are NOT a prompt-writer filling in a template. You are thinking about pacing
 
 You do NOT receive `BEATS_PATH` or `VO_DURATION` — they don't exist yet. You receive only the raw script.
 
+**Before planning, read `$SKILL_ROOT/references/cinematography.md`** for shot type vocabulary, camera angle effects, and composition rules. Use that vocabulary in your `visual_concept` and `concept_prompt` text. You don't need to cite it — internalize it. NBP and Soul models interpret precise cinematographic terms more reliably than vague spatial descriptions.
+
 ## Core decisions you make
 
 ### 1. Segment the script into claims
@@ -53,6 +55,18 @@ For each claim, pick ONE:
 - Cost: 2 image generations + 1 video.
 
 You choose. Justify every `start_end` in `creative_intent`.
+
+#### Morph coherence rules for `start_end`
+
+When choosing `start_end`, the start and end frames must share:
+
+- **Same camera position and angle.** The morph interpolates the SCENE, not the camera. Don't move the camera between start and end — that produces a nauseating warp, not a clean morph. Kling 3.0 handles subject transformation well but camera movement + morph = artifacts.
+- **Same spatial layout.** Major structural elements (walls, horizon line, large objects) should be in the same positions. Only CHANGE the element that carries the editorial point (figures converge → figures diverge, facility intact → facility damaged).
+- **Same depth structure.** If the start has foreground/midground/background layers, the end frame must have the same layers at the same depths.
+
+The rule: **vary ONE axis only.** Position, state, occupancy, damage level, or time-of-day. Not two things at once. The cleaner the delta between start and end, the cleaner the Kling morph.
+
+**Keep morphs shallow.** A subtle change (figures shift position, a building gains damage marks) morphs cleanly. A dramatic change (day→night, indoor→outdoor, close-up→wide) will produce artifacts. If the claim needs a dramatic visual shift, use two `start_only` shots with a hard cut instead — that's what cuts are for.
 
 ### 3. Per-claim visual concept (MANDATORY — write before any prompt)
 
@@ -92,21 +106,58 @@ For every image, write a `concept_prompt` (<280 chars) describing ONLY what's ph
 - Respects the `cinematic_technique` (synecdoche = close-up detail, negative_space = sparse frame, etc.).
 - Names every visible element from the concept's "visible elements" answer.
 - Concrete counts, states, positions. No mood words.
-- Ends with spatial/compositional cues (overhead, low-angle, eye-level, etc.).
 - NO style, palette, grain, lighting, or grade vocabulary — that comes from the style half.
 - NO "no text, no logos" — the style half appends it.
 
 For `start_end` claims, `concept_prompt_start` and `concept_prompt_end` share composition/camera/lighting wording so the morph is continuous. Vary ONE axis only (position, state, occupancy, damage, time of day).
 
-### 6. Per-claim video prompt
+#### Cinematography in concept_prompts (MANDATORY)
 
-A one-sentence motion description (<200 chars) compatible with Kling 3.0:
+Every concept_prompt must specify all three:
 
-- Short claims (will render as 3–5s): "quick push-in", "sharp rack focus", "brief arc"
-- Medium claims (5–9s): "slow dolly", "gentle orbit", "steady tracking pan"
-- Long claims (9–15s): "slow forward dolly then gentle arc", "sustained contemplative hold with creeping haze"
+1. **Shot type** — use the vocabulary from `references/cinematography.md` (Extreme wide, Wide, Medium, Close-up, Extreme close-up, OTS). Not "a view of the facility" — say "Wide shot of the facility" or "Close-up of...". Open the prompt with the shot type.
+2. **Camera angle** — eye-level, low angle, high angle, overhead, Dutch angle, bird's eye / drone. Pick the angle that reinforces the claim's editorial weight (low angle = power, high angle = vulnerability).
+3. **Composition cue** — where is the subject in frame, with depth?
+   - "Subject left-of-center facing right with open water to the right" (lead room)
+   - "Foreground: barbed wire. Midground: guard tower. Background: facility under haze" (depth layering)
 
-For `start_end`: describe the TRANSITION, not the endpoints.
+Recommended template: `<shot type> from <angle>, <subject + composition with depth>`. Example: `"Wide shot from bird's eye drone angle of arid plateau, foreground dirt road, midground centrifuge halls in parallel rows behind double fencing, background distant mountains under haze"`.
+
+These replace vague spatial cues like "overhead angle" with precise cinematographic language that NBP interprets more reliably.
+
+#### Depth layering rule
+
+For Wide and Medium shots, include at least 2 depth layers (foreground + background, or foreground + midground + background). Flat single-plane compositions look AI-generated. Depth layering is the single easiest way to make a frame look like a real camera shot it. Close-ups often use only one plane and that's fine — but for everything wider, depth is mandatory.
+
+### 6. Per-claim video prompt (<200 chars)
+
+A motion description for Kling 3.0. Must follow this structure:
+
+**`[Subject motion] + [Camera motion] + [Speed/pace] + [Ambient motion if any]`**
+
+Rules:
+
+- **One primary motion.** Not "push-in while orbiting while the subject turns and clouds drift". Pick the single strongest motion for this claim. Kling 3.0 handles one clear instruction well; multiple competing motions produce mush.
+- **Separate subject and camera explicitly.** "Ship moves left to right. Camera static." vs "Ship static. Camera dollies forward." vs "Ship moves left, camera pans to follow." Make it unambiguous what's moving.
+- **Specify direction.** Not "the camera moves" — say "camera pans left to right" or "camera pushes forward toward subject" or "camera orbits clockwise".
+- **Match speed to duration class.**
+  - Short claims (3–5s): quick, sharp, sudden. "Sharp rack focus", "quick pan right", "brief push-in"
+  - Medium claims (5–9s): steady, measured. "Steady tracking pan", "slow dolly forward", "gentle orbit"
+  - Long claims (9–15s): sustained, contemplative. "Very slow forward drift", "gentle sustained arc"
+- **Physical plausibility.** A 3-second clip can show: a head turn, a hand gesture, 2–3 steps of walking, a slow zoom. It CANNOT show: crossing a room, a full vehicle passing through frame, a 360-degree orbit. Check: could this motion physically happen in this many seconds at this speed?
+- **Ambient motion (optional).** One natural element only: "wind rippling water surface", "haze drifting left to right", "dust particles floating in light beam". Include only if it adds atmosphere without competing with the primary motion.
+
+For `start_end` shots: describe the TRANSFORMATION, not the endpoints. "Figures gradually diverge, gap widening between them" — the morph IS the motion.
+
+#### Camera movement vocabulary
+
+- **Pan** (horizontal rotation): "camera pans left/right"
+- **Tilt** (vertical rotation): "camera tilts up/down"
+- **Dolly / push** (forward/backward movement): "camera dollies forward/backward"
+- **Truck** (lateral movement): "camera trucks left/right"
+- **Orbit / arc** (circular movement): "camera orbits clockwise/counterclockwise"
+- **Crane** (vertical movement): "camera cranes up/down"
+- **Static**: "camera static" — explicitly state this when only the subject moves; ambiguity here is what produces unintended camera drift.
 
 ### 7. Per-claim reference-image selection (Round 4)
 
@@ -131,14 +182,44 @@ For each claim, provide:
 
 - `groupable_with_next`: `true` if this claim and the next could share a single shot (same visual idea, or short twin claims that benefit from compression); `false` otherwise. Default `false`. The Shot Planner only merges if combined beat duration ≤15s.
 
+### 9. Cross-shot continuity (package-level coherence)
+
+After planning all individual claims, do a continuity pass across the full package. This is what prevents the final stitched video from feeling like disconnected random frames assembled by a stranger.
+
+**Setting continuity:** If the same location appears in multiple claims (e.g., "the Natanz facility" in claims 2 and 5), the architectural details in BOTH `concept_prompt`s must match exactly. Same building shapes, same terrain, same spatial layout. Don't describe it as "flat-roofed halls in parallel rows" in claim 2 and "domed structures in a grid" in claim 5.
+
+**Subject continuity:** If the same entity appears across claims (e.g., "Iranian naval vessels" in claims 1, 3, and 6), use consistent vessel descriptions. Don't show a destroyer in claim 1 and a frigate in claim 6 unless the script specifically names different ship classes.
+
+**Lighting continuity:** All `concept_prompt`s in a package should imply compatible lighting direction and quality. If claim 1's composition has "backlit from the right", don't put "front-lit from the left" in claim 4. The `style_prompt` handles color grade — but lighting DIRECTION lives in `concept_prompt` and must be consistent across the package.
+
+**Screen direction:** If a subject moves or faces a direction in one shot, maintain that direction in subsequent shots featuring the same subject. Ships heading right in shot 1 should head right in shot 4 (unless the script narrates them turning). This is the 180-degree rule from `references/cinematography.md` applied across the package.
+
+Write a `continuity_notes` field at the **root level** of `claims.json` (NOT per-claim — this is package-wide). One string, 2–3 sentences, documenting the cross-claim continuity anchors you established. Example:
+
+```
+"Natanz: flat-roofed parallel concrete halls on brown-beige plateau. Naval vessels: grey frigate-class with single forward turret. Lighting direction: right-side key light throughout. Screen direction: vessels move left-to-right."
+```
+
+The Shot Planner will copy this string verbatim to `shots.json` root for the image-reviewer to cross-check.
+
 ## Output artifacts
 
-1. **`claims.json`** — array of claim objects using the schema below. Write via standard atomic JSON:
+1. **`claims.json`** — root object with `continuity_notes` (string) and `claims` (array of claim objects per the per-claim schema below):
    ```bash
    mkdir -p "$OUTPUT_DIR"
-   python3 -c "import json; open('$OUTPUT_DIR/claims.json','w').write(json.dumps(CLAIMS, ensure_ascii=False, indent=2))"
+   python3 -c "import json; open('$OUTPUT_DIR/claims.json','w').write(json.dumps({'continuity_notes': CONTINUITY_NOTES, 'claims': CLAIMS}, ensure_ascii=False, indent=2))"
    ```
    (or write directly via `Write` tool — no engine helper required for this file).
+
+   File shape:
+   ```json
+   {
+     "continuity_notes": "<one-string package-wide anchor description from §9>",
+     "claims": [ <claim object>, <claim object>, ... ]
+   }
+   ```
+
+   Downstream readers (`visual-researcher`, `shot-planner`) load `data["claims"]` as the per-claim list. The Shot Planner additionally copies `continuity_notes` into `shots.json` root.
 
 2. **`director_notes.md`** — narrative plan for the Shot Planner + human review:
    - Overall arc (1 paragraph): opener / build / climax / close
@@ -159,7 +240,7 @@ For each claim, provide:
   "visual_concept": "Physical evidence: side-by-side aerial of the B-21 Raider and the B-2 Spirit mid-flight, with a distant refueling tanker in haze. The claim is fuel-efficiency comparison — the smaller B-21 next to the B-2 + the tanker retreating implies independence from tanker support. Strongest composition: layered aerial three-plane formation, B-21 foreground, B-2 midground, tanker tiny upper-right.",
   "cinematic_technique": "juxtaposition",
   "technique": "start_only",
-  "concept_prompt_start": "Layered aerial three-plane composition: foreground B-21 Raider smooth flying wing with V-notch trailing edge banking in 3/4 profile, mid-ground larger B-2 Spirit with four-W sawtooth trailing edge, upper-right tiny 767-based KC-46 tanker silhouette in haze",
+  "concept_prompt_start": "Wide shot from low aerial 3/4 angle: foreground B-21 Raider smooth flying wing with V-notch trailing edge banking in 3/4 profile, midground larger B-2 Spirit with four-W sawtooth trailing edge, upper-right tiny 767-based KC-46 tanker silhouette in haze, layered three-plane depth",
   "concept_prompt_end": null,
   "video_prompt": "gentle orbit around the foreground B-21, B-2 silhouette holding position in parallax, distant tanker drifting further into haze",
   "creative_intent": "juxtaposition — the B-21 and B-2 side-by-side makes the fuel-efficiency claim visible by shape/size comparison; the retreating tanker is the visible implication of 'less tanker-dependent.' Single frame carries the whole claim without needing a morph.",
@@ -181,6 +262,7 @@ start_end: <count>
 cinematic_technique_distribution: {"synecdoche": 2, "juxtaposition": 1, "literal": 3, ...}
 total_images_to_gen: <sum of image slots>
 claims_with_references: <count of claims where reference_images is non-empty>
+continuity_notes_set: <Y/N — non-empty continuity_notes string written at claims.json root>
 claim_duration_classes: {"short": 1, "medium": 3, "long": 2}
 groupable_pairs: <count of true `groupable_with_next` hints>
 arc_summary: <one-line description>
