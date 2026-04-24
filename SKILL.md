@@ -112,6 +112,8 @@ When the user invokes "run `<slug>`":
 
 7. Write the script text from frontmatter's `vo.script` field to `$OUTPUT_DIR/script.txt` — needed by BOTH Phase 1 (audio page fill) and Phase 2.5 (creative-director input).
 
+8. **Round 4**: open (or reuse) the single `image` Chrome tab — no N-tab pre-warm loop anymore. Navigate it to `https://higgsfield.ai/ai/image?model=nano-banana-pro`. Don't verify Unlimited/aspect yet; the image-worker's preflight handles that per task. One tab is enough because Round 4's image-worker submits sequentially in a burst, and server-side render parallelism doesn't depend on client-tab count.
+
 ### Phase 1 + Phase 2.5 — VO synthesis ∥ Creative Director (DISPATCH TOGETHER)
 
 These two run concurrently. **Dispatch both in a single orchestrator turn** (one Agent tool call for the creative-director plus the browser_navigate/type/click sequence for VO — see the parallel-dispatch rules section).
