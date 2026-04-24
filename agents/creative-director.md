@@ -108,7 +108,22 @@ A one-sentence motion description (<200 chars) compatible with Kling 3.0:
 
 For `start_end`: describe the TRANSITION, not the endpoints.
 
-### 7. Pacing hints for the Shot Planner
+### 7. Per-claim reference-image selection (Round 4)
+
+The Visual Researcher has (or will have) downloaded candidate reference images for each claim into `$OUTPUT_DIR/references/claim_<id>/*.{png,jpg,webp}`. You decide which (if any) are appropriate to attach to the NBP multimodal generation for that claim.
+
+Rules:
+- **Default: none.** Leave `reference_images: []` unless there's a specific accuracy reason to attach one. Burst submission is faster and simpler without attachments.
+- **Attach when the claim's visual_concept names a specific real-world thing** whose appearance is load-bearing for the claim: a named building, an identifiable military vehicle/weapon class, a specific geographic location. The downloaded reference gives NBP a visual anchor for that thing.
+- **Cap: 1 reference per claim** in the first Round 4 implementation. If the smoke test reveals NBP supports N>1 cleanly (see trap #23), this cap may be raised later.
+- **Reject references that would bias the composition**. If the researcher downloaded a heroic low-angle shot of a warship but your composition is overhead-drone, don't attach — the reference would fight the composition.
+- **Check that the file exists.** List `$OUTPUT_DIR/references/claim_<id>/` via `Bash` before picking. If the researcher's list in `claim.reference_images_start` contains a path, verify the file is actually there; skip paths that aren't on disk.
+
+Output: set `reference_images: ["<absolute path>", ...]` on the claim (0 or 1 entries). For `start_end` claims, use the SAME reference_images list for both endpoints of the morph (consistency across the morph requires consistent anchor).
+
+If no appropriate reference exists, set `reference_images: []` — this is the correct answer most of the time.
+
+### 8. Pacing hints for the Shot Planner
 
 For each claim, provide:
 
@@ -149,7 +164,8 @@ For each claim, provide:
   "video_prompt": "gentle orbit around the foreground B-21, B-2 silhouette holding position in parallax, distant tanker drifting further into haze",
   "creative_intent": "juxtaposition — the B-21 and B-2 side-by-side makes the fuel-efficiency claim visible by shape/size comparison; the retreating tanker is the visible implication of 'less tanker-dependent.' Single frame carries the whole claim without needing a morph.",
   "estimated_duration_class": "long",
-  "groupable_with_next": false
+  "groupable_with_next": false,
+  "reference_images": []
 }
 ```
 
@@ -164,6 +180,7 @@ start_only: <count>
 start_end: <count>
 cinematic_technique_distribution: {"synecdoche": 2, "juxtaposition": 1, "literal": 3, ...}
 total_images_to_gen: <sum of image slots>
+claims_with_references: <count of claims where reference_images is non-empty>
 claim_duration_classes: {"short": 1, "medium": 3, "long": 2}
 groupable_pairs: <count of true `groupable_with_next` hints>
 arc_summary: <one-line description>
@@ -179,3 +196,5 @@ arc_summary: <one-line description>
 - Never write prompts longer than 280 chars (concept_prompt) or 200 chars (video_prompt).
 - Never assign durations, start/end timestamps, beat_ids, or shot_ids — those belong to the Shot Planner. You assign `claim_id` only.
 - Never assume the VO duration, total shot count, or where the Shot Planner will cut. You're producing creative work that will be fitted to timing later.
+- Never attach a reference image that isn't actually on disk. The Visual Researcher's `reference_images_start` list may contain paths that failed to download — verify each with `[[ -f "$PATH" ]]` before adding to your output.
+- Never attach more than 1 reference per claim in Round 4. Raise this cap only after `traps.md #23` is updated with a verified multi-attach mechanism.
