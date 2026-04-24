@@ -88,7 +88,7 @@ When the concept_prompt includes people from or in a specific country:
 - NEVER use stereotypes or caricatures. Use factual, respectful descriptors based on what real people in those roles actually look like in photos.
 - Remember: no text, no readable insignia, no flags with text, no real identifiable faces. You're describing TYPES of appearance, not specific individuals.
 
-### Step 5 — Write results
+### Step 5 — Write results AND emit per-shot completion marker (critical for pipelining)
 
 For each shot (per role), update via shot_state.py. Use careful shell quoting — long enriched prompts and JSON arrays must survive the subprocess call:
 
@@ -105,6 +105,16 @@ python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_i
 python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id \
   "images.$role.reference_urls=$JSON_ARRAY"
 ```
+
+**Per-shot pipelining signal (MANDATORY)** — after you finish enriching ALL roles of a shot (just `start` for `start_only`, or both `start` and `end` for `start_end`), touch a marker file:
+```bash
+mkdir -p "$OUTPUT_DIR/.research_markers"
+touch "$OUTPUT_DIR/.research_markers/shot_${shot_id}.done"
+```
+
+The orchestrator polls `$OUTPUT_DIR/.research_markers/shot_*.done` every ~3s. When it finds a new marker, it runs the invariant check for that shot and flips that shot's `images.<role>.status` from `pending_research` → `queued` so image workers can submit immediately. This overlaps your Phase 3.7 with Phase 4 image submission instead of forcing the worker pool to wait until your whole range is done.
+
+Emit the marker AFTER you've written all role updates and verified the concept_prompt length cap locally — do NOT emit early.
 
 Also write a research log for the project at `$OUTPUT_DIR/research_log.md`:
 

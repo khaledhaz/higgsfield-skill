@@ -92,7 +92,9 @@ The user can manage the cron via `CronList` / `CronDelete` (builtin tools).
 
 You (main Claude session) ARE the orchestrator. Your job is to dispatch subagents, gate phases, and keep the project note in sync.
 
-### Phase 0 — Intake
+**Round 2 architectural principle — maximize overlap.** The slow server-side operations (VO gen ~45s, NBP render ~60s, Kling render ~120s) are hard floors. Everything else — creative planning, style building, tab setup, research, reviews — must overlap them rather than stack serially. Target total time for a 6-shot project: ~5–6 min (vs ~19 min pre-optimization).
+
+### Phase 0 — Intake + parallel precompute
 
 When the user invokes "run `<slug>`":
 1. Run `engine/preflight.sh` to clear any stale Chrome lock.
@@ -101,136 +103,178 @@ When the user invokes "run `<slug>`":
 4. Verify `status` is `active`, `inbox`, or `scheduled`. Set it to `active` via `engine/update_status.py`.
 5. Ensure `$PWD/hf-outputs/<slug>/` exists; create if missing.
 
-### Phase 1 — VO synthesis
+**Precompute during intake (so Phase 3.5 is instant later):**
+6. Read the `## Style notes` section of the project note and build the `STYLE_PROMPT` string now, in-memory:
+   ```
+   <style vocabulary from ## Style notes>, <aspect ratio from frontmatter>, no text, no numbers, no logos, no readable flags
+   ```
+   Hold this string. When `shots.json` exists (Phase 3), injection is a 2s loop instead of a 5s re-read.
 
-Produce `vo.mp3` using Eleven v3 with the voice named in frontmatter. Overwrite existing if present. Cost: ~2 credits/minute. Log the result in the `<!-- engine:begin --> ... <!-- engine:end -->` block.
+7. Write the script text from frontmatter's `vo.script` field to `$OUTPUT_DIR/script.txt` — needed by BOTH Phase 1 (audio page fill) and Phase 2.5 (creative-director input).
+
+### Phase 1 + Phase 2.5 — VO synthesis ∥ Creative Director (DISPATCH TOGETHER)
+
+These two run concurrently. **Dispatch both in a single orchestrator turn** (one Agent tool call for the creative-director plus the browser_navigate/type/click sequence for VO — see the parallel-dispatch rules section).
+
+**Phase 1 — VO synthesis** (server-side ~45s):
+Navigate to `/audio`, verify Eleven v3 + voice from frontmatter, clear editor + fill script, click Generate. Do NOT wait for render yet — while it renders, Phase 2.5 is already executing.
+
+**Phase 2.5 — Creative Director** (Opus ~40s):
+Dispatch `creative-director` with `SCRIPT_PATH`, `STYLE_NOTES`, `ASPECT`, `SKILL_ROOT`. This agent reads ONLY the script text and produces `claims.json` with per-claim creative decisions: `visual_concept`, `cinematic_technique`, `technique` (start_only/start_end), `concept_prompt_start`, optional `concept_prompt_end`, `video_prompt`, `creative_intent`, `estimated_duration_class`, `groupable_with_next`.
+
+Creative Director does NOT receive beats or VO_DURATION — those don't exist yet. All creative work that doesn't need timing is done here, in parallel with the VO render.
+
+Both must DONE before proceeding. Typical wall clock: ~45s (VO is the long pole; Creative Director finishes first and waits).
+
+**Invariants on `claims.json`** (verify when Creative Director returns):
+- 3–8 claims (typical range; ≥4 triggers the technique-variety rule).
+- Every claim has a non-empty `visual_concept`.
+- Every claim has a `cinematic_technique` from the allowed set.
+- If ≥4 claims: at least 2 distinct `cinematic_technique` values.
+- Every `concept_prompt_start` (and `_end` if present) is ≤280 chars with no style/grain/palette/lighting vocabulary.
 
 ### Phase 2 — VO analysis (dispatch `vo-analyst`)
 
-Write the script text from frontmatter's `vo.script` field to `$OUTPUT_DIR/script.txt`. Dispatch the `vo-analyst` subagent with `VAULT_DIR`, `OUTPUT_DIR`, `SCRIPT_PATH`. On `DONE`, read `beats.json`, render a markdown table, and update the note's `<!-- engine:beats -->` region via `engine/update_region.py`.
+After VO download + probe, dispatch `vo-analyst` with `VAULT_DIR`, `OUTPUT_DIR`, `SCRIPT_PATH`. On DONE, read `beats.json` and render the markdown table for `<!-- engine:beats -->`.
 
-### Phase 3 — Director planning (dispatch `director`)
+Typical wall clock: ~25s (Whisper medium locally).
 
-The `director` subagent (Opus-tier) plans the full montage: how many shots, how long each one runs, which shots use single-frame animation vs start→end morph, and the image+video prompts for each. This replaces the old mechanical `prompt-writer` INIT flow.
+### Phase 3 — Shot Planner (dispatch `shot-planner` — fast Sonnet)
 
-Dispatch the `director` with `OUTPUT_DIR`, `SCRIPT_PATH`, `BEATS_PATH`, `VO_DURATION`, `STYLE_NOTES`, `ASPECT`, `SKILL_ROOT`.
+After BOTH Phase 2 (beats.json) AND Phase 2.5 (claims.json) are complete, dispatch `shot-planner` with `CLAIMS_PATH`, `BEATS_PATH`, `VO_DURATION`, `SKILL_ROOT`.
 
-The director produces:
-- `shots.json` — array of shot objects with per-shot `technique` (`start_only` or `start_end`), `images.start.prompt` (always), `images.end.prompt` (only if `start_end`), `video_prompt`, `director_intent`, float `duration`.
-- `director_notes.md` — narrative rationale (arc, pacing, technique choices).
+The Shot Planner is pure constraint satisfaction:
+- Fuzzy-matches each claim's `claim_ar` against the beat timings.
+- Applies `groupable_with_next` hints where combined beat duration ≤15s.
+- Splits any single claim that spans >15s of beats into multiple shots (all sharing the same visual concept).
+- Assigns exact float durations so `sum(shot.duration) === VO_DURATION` (±0.01s).
+- Honors the last-shot tail rule (`duration ≤14s` so +1s Kling pad stays ≤15s).
+- Writes `shots.json` with `images.<role>.status = "pending_research"` (see Phase 3.7+4 below).
 
-After DONE, read `shots.json` and render the shots-table region in the note. Save `director_notes.md` alongside it for the user to review.
+Typical wall clock: ~15s (Sonnet, no creative thinking needed).
 
-**Invariants the orchestrator verifies**:
+**Invariants the orchestrator verifies on `shots.json`**:
 - `sum(shot.duration) === VO_DURATION` (±0.01s).
-- Every beat covered by ≥ 1 shot (`beat_ids` unions tile the beats).
-- Every shot has a non-empty `visual_concept` string.
-- Every shot has a `cinematic_technique` from the allowed set (`synecdoche`, `juxtaposition`, `scale_contrast`, `negative_space`, `environmental_storytelling`, `visual_irony`, `literal`).
-- In projects with 4+ shots, at least 2 distinct cinematic techniques are used (technique-variety rule).
-- Every image has `images.start.concept_prompt` (<280 chars) and NO style/palette/grain vocabulary in it. `start_end` shots additionally have `images.end.concept_prompt`.
-- `images.<role>.style_prompt` and `images.<role>.prompt` are `null` at this stage — they get populated in Phase 3.5 and Phase 4 respectively.
+- Every beat covered by ≥1 shot (`beat_ids` tile the beats).
+- Every shot has non-empty `visual_concept` + `cinematic_technique` from the allowed set.
+- Technique-variety rule holds (same as before; Creative Director's output should already satisfy it).
+- Last shot `duration ≤14s`.
+- Every image has `concept_prompt` ≤280 chars, no style vocab, `style_prompt=null`, `prompt=null`, `status="pending_research"`.
 
-### Phase 3.5 — Style injection (orchestrator, not a subagent)
+### Phase 3.5 — Style injection (instant — string already built)
 
-After the director returns `shots.json`, the orchestrator reads the project note's `## Style notes` section and builds a single `style_prompt` string:
+Phase 0 already built `STYLE_PROMPT`. Loop over every image slot and set `images.<role>.style_prompt=$STYLE_PROMPT` via `shot_state.py update`. ~2s total.
 
+Also **pre-build the stitch manifest template** right here:
+```json
+{
+  "output": ".../final.mp4",
+  "resolution": [1280, 720],
+  "fps": 24,
+  "vo": {"path": ".../vo.mp3", "tail_pad": 1.0},
+  "cut_xfade": 0,
+  "clips": [
+    {"type": "video", "path": null, "duration": 9.48},
+    ...
+    {"type": "video", "path": null}   // last clip, no duration (natural Kling length)
+  ]
+}
 ```
-<style vocabulary from ## Style notes>, <aspect ratio from frontmatter>, no text, no numbers, no logos, no readable flags
-```
+Save as `$OUTPUT_DIR/manifest_template.json`. Phase 5 will fill in clip paths as videos download; Phase 6 runs stitch without any extra setup.
 
-Then for every image entry in every shot, set `images.<role>.style_prompt` to this string:
+### Phase 3.7 + Phase 4 + Phase 5 — Research ∥ Images ∥ Videos (fully interleaved)
 
-```bash
-python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_id> "images.<role>.style_prompt=<built-style-string>"
-```
+The Round 2 pipelining collapses all three downstream phases into one interleaved block. Research completions stream → images submit as each shot gets enriched → image reviews stream → videos submit as each shot's images pass. No phase has a "wait for all of previous phase" gate.
 
-This guarantees every image in the package shares identical rendering instructions regardless of which agent wrote the concept, and that retries on individual shots never drift the package's visual identity. The image-worker concatenates `concept_prompt + ", " + style_prompt` → `prompt` at submission time.
+#### Tab pre-warming (started during Phase 0, completes during Phase 1)
 
-### Phase 3.7 — Visual research (parallel `visual-researcher` dispatches)
+At the end of Phase 0, kick off a background tab-warmup: open 6 Chrome tabs and navigate each to `https://higgsfield.ai/ai/image?model=nano-banana-pro`. Verify the Unlimited toggle is ON for each tab. This takes ~15s but runs in parallel with VO gen (45s) and Creative Director (40s), so it adds no wall time.
 
-Between style injection and image generation, the `visual-researcher` subagent enriches every shot's `concept_prompt` with real-world physical-accuracy details. The director decided WHAT to show (composition, technique, intent). The researcher makes sure every named element in the frame LOOKS CORRECT when NBP renders it — named buildings, specific weapon systems, country-specific people/attire, industrial equipment, landmark geography.
-
-**Parallel dispatch rule**:
-- If `len(shots) >= 4`, dispatch TWO researchers concurrently (single message, two Agent tool calls) with disjoint shot ranges:
-  - Researcher A: `SHOT_RANGE=[1, ceil(N/2)]`, `SEARCH_BUDGET=10`
-  - Researcher B: `SHOT_RANGE=[ceil(N/2)+1, N]`, `SEARCH_BUDGET=10`
-- If `len(shots) < 4`, dispatch a single researcher with no `SHOT_RANGE` and the default `SEARCH_BUDGET=20`.
-
-Both researchers read and write the same `shots.json` — the dispatch is race-safe because each researcher only mutates shot IDs inside its assigned range, and `shot_state.py update` is atomic. Both append to the same `research_log.md` (append-only, no conflict).
-
-Each dispatch receives: `OUTPUT_DIR`, `SCRIPT_PATH`, `SKILL_ROOT`, `SLUG`, and the optional `SHOT_RANGE` + `SEARCH_BUDGET`. The agent reads each in-range shot's `visual_concept` and `concept_prompt`, runs targeted web searches (max 3/element, `SEARCH_BUDGET` total), and appends physical descriptors to the concept_prompt — without changing composition, camera angle, cinematic technique, or editorial intent. For named landmarks/equipment/vehicles, it may attach reference image URLs to `images.<role>.reference_urls` (JSON array) for the image-worker's optional use.
-
-After BOTH dispatches return DONE, the orchestrator verifies (across all shots):
-- Every `concept_prompt` is still ≤280 chars.
-- No concept_prompt gained style/palette/grain vocabulary (style-bleed guard).
-- No concept_prompt gained "no text / no logos / no flags" phrasing (that lives in `style_prompt`).
-- `$OUTPUT_DIR/research_log.md` exists with a per-(shot, role) entry for human review.
-- `visual_concept`, `cinematic_technique`, `director_intent`, `claim_summary_en`, `duration`, `technique` on every shot are unchanged (researcher never modifies director fields).
-
-If any invariant is broken, the orchestrator reverts the offending shot's `concept_prompt` to the pre-research value and logs the revert before moving on. Phase 3.7 is additive-only; a partial enrichment (some shots got enriched, others didn't) is acceptable.
-
-### Phase 4 + Phase 5 — Images and Videos (pipelined, fire-and-forget, stream review)
-
-These two phases DO NOT run sequentially. They interleave: the orchestrator submits all images in a fire-and-forget burst, reviews each image the moment it renders, and starts a shot's video submission as soon as its image(s) pass review — all while other shots are still rendering or being retried. This collapses what used to be ~12 minutes of serial Phase 4 → Phase 5 work into ~4 minutes of overlapping activity.
-
-#### Worker allocation
-
-- **Image-workers**: `min(total_image_tasks, 6)`. Each gets a roughly-equal slice of the `{shot_id, role}` task list, round-robin. For 8 image tasks → 6 workers, 2 of which get 2 tasks, 4 get 1 task.
-- **Video-workers**: NO separate allocation up front. As each image-worker finishes (its last task is either `rendered` or `fail`), the orchestrator marks that worker's tab FREE and spawns a video-worker on the same tab index. Tab reuse ensures we never hold more than 6 Chrome tabs open concurrently.
+By the time Phase 3.7+4 starts (~t=95s), all 6 tabs are ready. Workers skip setup.
 
 #### Step-by-step orchestration
 
-1. **Enumerate image tasks.** Build the list of `{shot_id, role}` pairs — one per image in `shots.json` where `images.<role>` is non-null. For a 10-shot plan with 2 `start_end` shots, that's 12 tasks.
+1. **Dispatch 2 parallel visual-researchers** (if ≥4 shots):
+   - Researcher A: `SHOT_RANGE=[1, ceil(N/2)]`, `SEARCH_BUDGET=10`
+   - Researcher B: `SHOT_RANGE=[ceil(N/2)+1, N]`, `SEARCH_BUDGET=10`
+   - If <4 shots, single researcher with default budget 20.
 
-2. **Dispatch image-workers (fire-and-forget).** Distribute tasks round-robin across up to 6 workers. Each worker runs `agents/image-worker.md`'s contract:
-   - Phase A (rapid-fire): submit every assigned task in ~3s each, using Lexical verify-after-fill to guard against the silent prompt-fill race observed on the Mars run (see trap entry to come).
-   - Phase B (batch poll): after all submissions, poll every 10s for completions and download as each finishes.
-   - Each completion updates `images.<role>.status` to `rendered`, stores the CDN asset UUID in `images.<role>.artifact_asset_id`, and clears `images.<role>.submitted_at` back to null.
+   Each researcher emits a per-shot completion marker: `$OUTPUT_DIR/.research_markers/shot_<id>.done` after finishing ALL roles of that shot (start, and end if start_end).
 
-3. **Stream review (dispatch `image-reviewer` SINGLE mode per completion).** The orchestrator polls `shots.json` every ~5s watching for `images.<role>.status == "rendered"`. When one flips:
-   - Dispatch `image-reviewer` in SINGLE mode for that single `(shot_id, role)`. These dispatches are cheap (~1s each) and they run concurrently if multiple images finish close together.
-   - On PASS: set `images.<role>.status=pass`. Check whether this shot's OTHER image (for `start_end`) is also `pass`; if both are (or the shot is `start_only`), the shot is now video-ready — see step 5.
-   - On FAIL with `images.<role>.attempts < retries_per_shot`: dispatch `prompt-writer` in RETRY mode to rewrite `images.<role>.concept_prompt`, reset `images.<role>.status=queued`, and hand the task back to ANY free image-worker (prefer the worker that was already idle) for a fresh Phase A+B cycle.
-   - On FAIL with attempts at cap: escalate — append a numbered `### Q:` to the note's `## Questions`, set `images.<role>.status=escalated`, the shot's video stays blocked (can't proceed without this image).
+2. **Dispatch 6 image-workers** (in the same orchestrator turn as step 1):
+   - Each gets its own `TAB_INDEX` (0..5) and starts in IDLE polling mode on its pre-warmed tab.
+   - Workers poll `shots.json` every ~3s for any image with `status == "queued"` and atomically claim via `status=submitting`, `claimed_by=<TAB_INDEX>`.
 
-   The key difference from BATCH review: retries can start within ~5s of a failure, overlapping with other shots' renders. The slowest shot no longer gates the review queue.
+3. **Orchestrator watcher loop** (runs concurrently with 1 and 2, ~3s tick):
+   For each tick:
+   - **Scan for new research markers**: `ls $OUTPUT_DIR/.research_markers/*.done`. For each new marker:
+     - Run the per-shot invariant check on that shot's concept_prompts (≤280 chars, no style vocab, no "no text/logos" phrasing, director fields unchanged).
+     - On pass: for every role in that shot, flip `images.<role>.status` from `pending_research` to `queued`. Workers will pick up within ~3s.
+     - On fail: revert the shot's concept_prompt to pre-research value, log to `research_log.md`, still flip to `queued` (downstream reviewer will still run).
+     - Delete the marker file to avoid re-processing.
+   - **Scan for completed image renders**: read `shots.json` for any `status == "rendering"` with `submitted_at` older than ~15s. On the NBP tab, check `img[alt="image generation"]` list for thumbnails matching those submissions. For each match:
+     - Download the webp → convert to png → record `artifact_path` + `artifact_asset_id` + `status=rendered`, clear `submitted_at`.
+     - Dispatch `image-reviewer` in SINGLE mode for that `(shot_id, role)`.
+   - **Scan for completed reviews**: for each review PASS, set `images.<role>.status=pass`. For each FAIL, dispatch `prompt-writer` RETRY (if attempts < cap) which rewrites the concept_prompt, resets status to `queued`, and the workers re-submit. Cap-hit → escalate.
+   - **Scan for video-ready shots**: use `next_video_ready` helper. If a shot is ready and a video-worker isn't running on its dedicated tab, spawn one (reuse a freed image-worker tab).
 
-   **Exception** — if ALL images happen to complete within 5 seconds of each other (tight batch, e.g. when retry volume is zero and the server renders at uniform speed), the orchestrator MAY collapse to a single BATCH dispatch for lower context overhead. This is an optimization, not a requirement.
+4. **Image-worker internals**: see `agents/image-worker.md` — the worker uses **localStorage priming** (not Lexical editor manipulation) for the prompt. Key primitives:
+   - `hf:image-form-upd`: `{prompt, enhance: true, withPrompt: true, seed: null}`
+   - `hf:nano-banana-2-image-form-3`: `{batch_size: 1, aspect_ratio, quality: "2k", use_unlimited: true, use_seedream_bonus: false}`
+   - Reload → preflight → click submit. ~3s per submission. **This eliminates the Lexical race bug from Round 1.**
 
-4. **Spawn video-workers as image-worker tabs free up.** An image-worker reports DONE (via its agent completion) when all its tasks are `rendered` or `fail`. At that point:
-   - The orchestrator marks the worker's tab FREE.
-   - If `next_video_ready` (the shot_state.py helper) returns a shot id, dispatch a `video-worker` on that tab index. The video-worker navigates to `/ai/video`, runs its localStorage-prime setup, and starts claiming from the shared queue.
-   - If `next_video_ready` is empty right now but some images are still pending review or retry, the tab stays warmed (worker agent stays alive polling the queue every ~10s).
+5. **Video-worker internals** (unchanged from Round 1): see `agents/video-worker.md`. Uses `next_video_ready` to claim a shot atomically, primes `flow-create-video-<date>` + `hf:video-kling-3-store:v2`, reloads, preflight, Generate. Tab reuse protocol unchanged.
 
-5. **Video-workers pull from the shared queue.** See `agents/video-worker.md`. Each video-worker repeatedly calls:
-   ```bash
-   NEXT=$(python3 $SKILL_ROOT/engine/shot_state.py next_video_ready "$OUTPUT_DIR/shots.json" "$TAB_INDEX")
-   ```
-   The engine helper atomically claims the lowest-id shot whose `video.status == "queued"` AND all required image roles have `status == "pass"`, marking it `claimed_<TAB_INDEX>` so no other worker races for it.
+6. **Stream reviewers** (unchanged from Round 1): `image-reviewer` SINGLE and `video-reviewer` SINGLE dispatched per completion.
 
-   For each claimed shot the worker primes both localStorage stores (`flow-create-video-<date>` for prompt + input/end images + `modelVersion=kling3_0`; `hf:video-kling-3-store:v2` for duration + aspect), reloads, runs the preflight checklist, and clicks Generate. No wait between submissions.
+7. **Manifest filling** (new): as each video downloads, open `manifest_template.json` and write the clip's `path` field in-place. When the last video downloads, the manifest is already complete — no post-processing needed.
 
-   **Kling duration derivation** (critical, last-shot rule):
-   ```
-   is_last = (shot.id == max_shot_id_in_project)
-   tail_pad = 1 if is_last else 0
-   kling_duration = max(3, min(15, round(shot.duration) + tail_pad))
-   ```
-   The +1s on the final shot provides tail material so the stitcher's freeze-frame pad doesn't land on a jump-cut to stillness.
+#### Timeline for a 6-shot / 8-image project
 
-6. **Video completion review (stream, same pattern).** As each video renders and downloads, dispatch `video-reviewer` in SINGLE mode. For `start_end` clips, the reviewer checks morph continuity (end frame of the clip should resemble the planned end image). Retries follow the same stream pattern — a failed video re-queues for its video-worker, fresh Kling render.
+```
+t=0    Intake + Style string built + tab warmup kicked off
+t=5    VO gen starts ──────────────────────┐
+t=5    Creative Director starts           ──┤ PARALLEL
+t=5    6 tabs warming                     ──┘
+t=20   Tabs ready (standing by)
+t=45   Creative Director DONE → claims.json
+t=50   VO DONE → downloaded
+t=57   Whisper vo-analyst starts
+t=82   Whisper DONE → beats.json
+t=82   Shot Planner starts → shots.json
+t=97   shots.json + style injected + manifest template ready
+t=99   Research A + B dispatched
+t=99   6 image-workers dispatched (IDLE polling)
+t=109  Shot 1 marker → queued → Worker submits (3s prime+reload+click)
+t=112  Image 1 rendering server-side
+t=115  Shot 4 marker → queued → Worker 1 submits
+...
+t=137  All 8 images submitted
+t=172  Image 1 rendered → reviewed PASS → video 1 submitted
+t=297  Video 1 rendered → reviewed PASS → manifest template updated
+...
+t=315  Last video ready, manifest complete
+t=317  Stitch (15s)
+t=332  DONE  (≈5.5 min total)
+```
 
-7. **Phase terminates** when every shot has `video.status in {"rendered","escalated"}` AND every image role has `status in {"pass","escalated"}`. At that point, update the `<!-- engine:shots -->` region in the note and proceed to Phase 6.
+#### Rate-limit handling (unchanged from Round 1)
 
-#### Rate-limit handling
+If a worker reports `BLOCKED: suspected_rate_limit`, pause new dispatches for 30s, then resume at half parallelism with a per-worker cap of 2 submissions.
 
-If an image-worker reports `BLOCKED: suspected_rate_limit`, the orchestrator:
-1. Pauses new image-worker dispatches.
-2. Waits 30s.
-3. Resumes with reduced parallelism (cut worker count in half, cap per-worker submissions to 2).
-4. Logs the incident in `research_log.md` so the self-learning system (`auto-edit:traps`) can capture the NBP rate-limit pattern.
+#### Status vocabulary (Round 2 adds `pending_research`)
 
-The same pattern applies for video-workers reporting rate-limit.
+`images.<role>.status` values in order:
+1. `pending_research` — Shot Planner initial; visual-researcher will flip to `queued` on marker
+2. `queued` — ready for an image-worker to claim
+3. `submitting` — worker claimed it, about to click Generate
+4. `rendering` — Generate clicked, server-side render in progress
+5. `rendered` — artifact downloaded, awaiting reviewer
+6. `pass` — reviewer PASS; shot may now progress to video
+7. `fail` — reviewer FAIL; retry (→ back to `queued`) or escalate (→ `escalated`)
+8. `escalated` — retry cap hit; paused awaiting user
+
+`video.status` values: `queued` / `claimed_<TAB_INDEX>` / `submitting` / `rendering` / `rendered` / `pass` / `fail` / `escalated`.
 
 #### Key invariants preserved
 
@@ -238,18 +282,21 @@ The same pattern applies for video-workers reporting rate-limit.
 - Retry count per shot is unchanged (`retries_per_shot` from frontmatter, default 5).
 - Every video still passes the preflight checklist (start-frame UUID match, prompt match, model = Kling 3.0, expected credit cost) before Generate is clicked.
 - Stitcher still trims non-last clips to exact float `shot.duration` and last clip still gets its +1s tail.
-- No serial per-shot drag-drop — video always uses localStorage priming.
+- Shot durations still sum to VO_DURATION exactly (enforced by Shot Planner).
+- Technique-variety rule still enforced (Creative Director side).
+- No "no text / no logos" in concept_prompts (style bleed guard still applies post-research).
 
-### Phase 6 — Stitch
+### Phase 6 — Stitch (manifest already templated in Phase 3.5)
 
-Write `manifest.json`. Two important rules:
+The manifest template was built in Phase 3.5 with all fields except clip paths. As each video downloaded in the pipelined block, the orchestrator filled in `manifest.clips[i].path`. By the time the last video is done, `manifest.json` is ready — rename `manifest_template.json` → `manifest.json` and run `engine/stitch.sh`.
 
-1. For **all non-last clips**, include `path` AND the exact float `duration` from `shots.json` — the stitcher trims with `-t $duration` so the final video track aligns to VO word timings precisely.
-2. For the **LAST clip**, OMIT the `duration` field (or set to `null`) so the clip plays at its full natural Kling length. The last shot was rendered with an extra +1s of Kling duration specifically to provide tail material in case the VO runs past the stitched video.
-3. Optionally set `vo.tail_pad` (default `1.0`). The stitcher forces the output duration to `vo_duration + tail_pad`:
-   - If stitched video < target: freeze-frame pads the last frame to fill.
-   - If stitched video > target: trims to target.
-   - VO is silence-padded to target — the VO is NEVER truncated.
+Manifest conventions (for reference, already encoded by the template):
+1. For non-last clips, `path` + exact float `duration` from `shots.json` — stitcher trims with `-t $duration`.
+2. For the LAST clip, `duration` omitted (null) — plays at its natural Kling length; stitcher freeze-frame-pads if still short of target.
+3. `vo.tail_pad` (default 1.0) forces output duration to `vo_duration + tail_pad`:
+   - Shorter stitched video → freeze-frame pad the last frame to fill.
+   - Longer stitched video → trim to target.
+   - VO is silence-padded to target — NEVER truncated.
 
 ```json
 {
@@ -293,12 +340,14 @@ When dispatching a subagent, include:
 Always pass SKILL_ROOT so subagents can invoke engine scripts without path guessing.
 
 **Parallel dispatch rules (when to send multiple tool calls in one message):**
-- Phase 3.7 with ≥4 shots → 2 `visual-researcher` dispatches, disjoint `SHOT_RANGE` (one message, two Agent calls).
-- Phase 4+5 start: up to 6 `image-worker` dispatches (one message, N Agent calls, each owning a distinct `TAB_INDEX`).
-- Phase 4+5 stream review: dispatch `image-reviewer`/`video-reviewer` (SINGLE mode) as each completion arrives — these go serial with respect to orchestrator polling, not parallel with each other (they're cheap).
-- Anything else (director, vo-analyst, stitcher) → single dispatch.
+- **Phase 1 + Phase 2.5**: dispatch VO synthesis (browser sequence) alongside `creative-director` (Agent call) in ONE orchestrator turn. The VO renders server-side while the creative director thinks. This is the biggest Round 2 win.
+- **Phase 3.7 with ≥4 shots**: 2 `visual-researcher` dispatches in one message, disjoint `SHOT_RANGE`.
+- **Phase 3.7+4 start**: 6 `image-worker` dispatches (one message, distinct `TAB_INDEX`) — fired concurrently with the researchers so workers can claim tasks the instant research flips a shot to `queued`.
+- **Stream reviews**: dispatch `image-reviewer`/`video-reviewer` (SINGLE mode) per completion — these go serial with respect to orchestrator polling (not parallel with each other) because each is cheap and the orchestrator needs verdicts to advance shot state.
+- **Tab pre-warming**: kicked off during Phase 0 as background work (6 tabs navigate to NBP). Not a subagent dispatch — direct browser commands.
+- **Single-dispatch phases** (run alone): `vo-analyst`, `shot-planner`, `prompt-writer` RETRY, stitch.
 
-The rule of thumb is: dispatch in parallel only when the tasks are truly independent AND the workers won't fight for shared state. Image-workers own disjoint tabs AND disjoint task lists; researchers own disjoint shot ranges — both safe. Reviewers are single-shot and serial-ok.
+The rule of thumb: dispatch in parallel when tasks are truly independent AND workers won't fight for shared state. Image-workers own disjoint tabs AND the claim protocol is atomic (`status=submitting` + `claimed_by=<TAB_INDEX>` re-check), so N workers can safely share the queue. Researchers own disjoint shot ranges — safe. Creative-director + VO synth operate on completely different resources (LLM + browser audio page) — safe.
 
 ## Self-learning rules (skill auto-edit)
 
