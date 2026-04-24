@@ -15,6 +15,7 @@ You do NOT review, retry-rewrite, or spawn other workers. That's the orchestrato
 
 - `OUTPUT_DIR`: project output dir (absolute)
 - `SHOTS_PATH`: absolute path to `shots.json`
+- `PROJECT_NOTE`: absolute path to the Obsidian project note (`$VAULT_DIR/Projects/<slug>.md`) — used by the PAUSE flow to append `### Q:` and flip frontmatter status
 - `TASKS`: JSON array of `{shot_id, role}` pairs for all image slots with `status=queued` (in shot-id then role-sorted order)
 - `PROJECT_ASPECT`: `"16:9"` / `"9:16"` / `"1:1"` (from frontmatter)
 - `SKILL_ROOT`: `/Users/khaled/.claude/skills/higgsfield`
@@ -122,7 +123,10 @@ async () => {
   for (let iter = 0; iter < 20; iter++) {
     const chips = Array.from(document.querySelectorAll('div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14'));
     if (chips.length === 0) break;
-    const btn = chips[0].querySelector('button');
+    // Anchor to the X icon's viewBox so we never accidentally click the
+    // size-full replace-with-new-file button (trap #23 — second button in chip).
+    const btn = chips[0].querySelector('svg[viewBox="0 0 20 20"]')?.closest('button')
+              || chips[0].querySelector('button'); // fallback if SVG ref-shape changes
     if (!btn) break;
     btn.click();
     removed++;
@@ -196,11 +200,15 @@ BURST SUBMIT LOOP:
                   "images.$ROLE.prompt=$FULL_PROMPT"
               # Click Generate
               browser_evaluate: document.getElementById('hf:image-form-submit').click()
-              submit_ts = current ISO timestamp
-              submitted.append({shot_id, role, submit_ts})
+              # Capture submit time in NBP's gallery format ("YYYYMMDD_HHMMSS") so it can
+              # be string-compared directly against thumbnail timestamps in the poll loop.
+              # Subtract 1 second to absorb clock skew between the browser and the server.
+              SUBMIT_TS_NBP=$(python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)-timedelta(seconds=1)).strftime('%Y%m%d_%H%M%S'))")
+              SUBMIT_TS_ISO=$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())")
+              submitted.append({shot_id, role, submit_ts_nbp: SUBMIT_TS_NBP, submit_ts_iso: SUBMIT_TS_ISO})
               python3 $SKILL_ROOT/engine/shot_state.py update "$SHOTS_PATH" $SHOT_ID \
                   "images.$ROLE.status=rendering" \
-                  "images.$ROLE.submitted_at=$submit_ts"
+                  "images.$ROLE.submitted_at=$SUBMIT_TS_ISO"
               wait 1s   # lets NBP's server-queue accept before the next preflight
               break     # next task
           # preflight had at least one failure
@@ -231,8 +239,10 @@ POLL & DOWNLOAD (if not paused):
               .filter(Boolean);
 
       for thumb in thumbs ordered by ts ascending:
-          # Match to earliest pending task whose submit_ts (converted to NBP's ts format) <= thumb.ts
-          task = earliest pending task with submit_ts <= thumb.ts_as_iso
+          # Both `thumb.ts` and `task.submit_ts_nbp` are "YYYYMMDD_HHMMSS" strings,
+          # which sort lexicographically the same as chronologically. Match to the
+          # earliest pending task whose submit_ts_nbp <= thumb.ts.
+          task = earliest pending task with submit_ts_nbp <= thumb.ts
           if not task: continue
 
           NN=$(printf "%02d" ${task.shot_id})
@@ -260,7 +270,7 @@ POLL & DOWNLOAD (if not paused):
       sleep POLL_INTERVAL_S
 
 PAUSE (if paused is set):
-  PROJECT_NOTE="$VAULT_DIR/Projects/${SLUG}.md"   # derive VAULT_DIR as the directory containing $OUTPUT_DIR's parent
+  # PROJECT_NOTE was passed in as a dispatch input — use it directly, no derivation.
 
   # Append the question block
   NN=$(printf "%02d" ${paused.shot_id})

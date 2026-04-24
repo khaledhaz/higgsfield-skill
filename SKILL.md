@@ -210,7 +210,7 @@ Round 4 collapses Phase 4 into a single NBP tab driven by ONE burst worker (Haik
 
 1. **Dispatch one `image-worker` (Haiku)** with the full task list:
    - `TASKS` = all `(shot_id, role)` pairs where `images.<role>.status == "queued"`, sorted by shot_id then role (start before end).
-   - `OUTPUT_DIR`, `SHOTS_PATH`, `PROJECT_ASPECT` (from frontmatter), `SKILL_ROOT`, `SLUG`.
+   - `OUTPUT_DIR`, `SHOTS_PATH`, `PROJECT_NOTE` (absolute path to `$VAULT_DIR/Projects/<slug>.md`, used by the worker's PAUSE flow), `PROJECT_ASPECT` (from frontmatter), `SKILL_ROOT`, `SLUG`.
    - Worker attaches to the pre-opened `image` tab, loops submit-with-preflight across all tasks, then polls+downloads until the gallery drains.
 
 2. **Wait for worker DONE or PAUSED.**
@@ -293,7 +293,7 @@ Round 4 is ~15-20s slower than Round 3 on the happy path. The tradeoff is single
 
 #### Rate-limit handling
 
-If the burst worker reports `BLOCKED: suspected_rate_limit` on Generate click, it pauses for 30s, then resumes. If the block persists for >3 consecutive submissions, it exits with PAUSED and surfaces the rate-limit to the user.
+Round 4 has no explicit rate-limit detection. If NBP starts rejecting submissions in a burst, the per-task preflight will fail in ways that don't auto-resolve and the per-check retry cap will trigger PAUSED via the standard pause flow — the user sees the question in the project note and can wait + resume manually. (A real rate-limit watcher is future work — track via `<!-- auto-edit:traps category=submission -->` if a pattern emerges.)
 
 #### Status vocabulary (Round 4 — unchanged from Round 3)
 
