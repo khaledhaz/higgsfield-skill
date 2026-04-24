@@ -1,96 +1,70 @@
 ---
 name: image-worker
-description: Submits NBP 2K Unlimited image generations on Higgsfield via localStorage priming + page reload. Polls shots.json for status=queued tasks and claims them atomically. Tabs are pre-warmed by the orchestrator.
+description: Submits ONE NBP 2K Unlimited image generation on Higgsfield via localStorage priming + page reload, then polls for TWO variants (batch_size=2), downloads both, and records them as a variants array in shots.json. One worker per image task for true simultaneous submission. Has a fallback multi-task loop for retry waves.
 tools: Bash, Read, Write, mcp__playwright__browser_navigate, mcp__playwright__browser_tabs, mcp__playwright__browser_evaluate, mcp__playwright__browser_snapshot, mcp__playwright__browser_wait_for
 model: haiku
 ---
 
-# Image Worker (localStorage priming + IDLE polling)
+# Image Worker (Round 3 — one task, batch_size=2)
 
-You are one of up to six parallel image-workers. You OWN a Chrome tab by index. The orchestrator has already pre-warmed your tab (navigated to `/ai/image?model=nano-banana-pro` with Unlimited=ON, 16:9, 2K), so you skip setup and start claiming work immediately.
+You OWN a Chrome tab by index. The orchestrator pre-warmed your tab to `/ai/image?model=nano-banana-pro` with Unlimited ON, 16:9, 2K. You have exactly ONE image task to submit on this dispatch (the initial pass), then poll for TWO variants (because `batch_size=2`), download both, record them as a variants array. Then you're done.
 
-**Round 2 behavior changes from the prior version**:
-- **localStorage priming replaces Lexical editor manipulation**: prompt goes into `hf:image-form-upd` + reload, bypassing the select-all/delete/type race that caused the shot 6-8 prompt-lag bug.
-- **IDLE polling**: you don't receive a fixed `TASKS` list up-front. Instead you poll `shots.json` for tasks with `images.<role>.status == "queued"`, atomically claim one by flipping to `submitting`, and submit. When the queue is empty, you idle. The visual-researcher streams enrichment completions, so your work arrives as research finishes — you're never blocked on the whole batch being ready.
+**Round 3 behavioral changes from Round 2:**
+- **One task per worker, not a queue**: the orchestrator dispatches N workers for N images, all in one message. Each gets exactly one `(shot_id, role)`. Workers submit in parallel within ~4s of each other.
+- **`batch_size=2`**: each submission produces 2 rendered variants. You download both and record them in `images.<role>.variants` (a 2-entry array). The image-reviewer picks which one is `selected_variant` downstream.
+- **Fallback multi-task loop** (for retry waves): if the orchestrator hands you a `TASKS` array instead of a single task, loop through them with the rapid-fire pattern from Round 2. The orchestrator uses this only when processing failure retries.
 
 ## Inputs (from dispatch message)
 
-- `TAB_INDEX`: 0..5 — your pre-warmed tab
-- `OUTPUT_DIR`: project output directory (contains `shots.json`, `shots/`)
-- `SKILL_ROOT`: absolute path to skill root
-- `DEADLINE_SECS` *(optional, default 300)*: soft upper bound. If no new task becomes queued for 30s AND the queue is empty, report DONE.
+**Single-task mode (primary):**
+- `TAB_INDEX`: 0..9 — your pre-warmed tab
+- `OUTPUT_DIR`: project output directory
+- `SHOT_ID`: int
+- `ROLE`: `"start"` or `"end"`
+- `SKILL_ROOT`: absolute path
 
-**No TASKS list.** The pool of tasks is the set of `{shot_id, role}` pairs in `shots.json` whose status is `queued`. Any worker can claim any task.
+**Multi-task fallback (retries only):**
+- `TAB_INDEX`, `OUTPUT_DIR`, `SKILL_ROOT` (as above)
+- `TASKS`: JSON array of `{shot_id, role}` pairs
 
-## Setup (minimal — orchestrator already did the heavy lifting)
+If `TASKS` is set, use the Round 2 multi-task loop. Otherwise, use the Round 3 single-task flow below.
+
+## Single-task flow
+
+### Step 1 — Attach + sanity check (<2s)
 
 1. `browser_tabs action=select, index=$TAB_INDEX`.
-2. Quick sanity check (one `browser_evaluate`): Unlimited switch is ON; page is `/ai/image?model=nano-banana-pro`; 16:9 and 2K badges visible.
-   - If the switch flipped OFF mid-session, click it ON once. Re-verify.
-   - If the page isn't NBP, report `BLOCKED: tab_<TAB_INDEX>_not_on_nbp`.
+2. Quick check (one `browser_evaluate`): verify the page is `/ai/image?model=nano-banana-pro`, Unlimited switch ON, 16:9, 2K. If Unlimited is OFF, click it ON once and re-verify. If page wrong, report `BLOCKED: tab_<TAB_INDEX>_not_on_nbp`.
 
-That's it. No prompt clearing, no aspect/resolution clicks — the orchestrator pre-warmed you.
-
-## Main loop
-
-Loop until the queue is empty AND the deadline has expired since last successful claim:
-
-### Claim phase (~1s)
-
-Walk `shots.json` in ascending shot_id order, find the first image with `status == "queued"`:
+### Step 2 — Load the prompt + record attempt (<1s)
 
 ```bash
-# Single pass: find any (shot_id, role) with images.<role>.status=queued
-# Atomic claim via update: set status=submitting with worker tag
-NEXT=$(python3 - <<PY
-import json, sys
-shots = json.load(open("$OUTPUT_DIR/shots.json"))
-for s in shots:
-    for role in ("start","end"):
-        img = s.get("images",{}).get(role)
-        if img and img.get("status") == "queued":
-            sys.stdout.write(f"{s['id']}:{role}"); sys.exit(0)
-PY
-)
-[ -z "$NEXT" ] && { sleep 3; continue; }
-IFS=: read -r shot_id role <<< "$NEXT"
-# Atomic claim — if someone else beat us to it, this still sets to submitting; that's ok (we'll race-safe check below)
-python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id \
-  "images.$role.status=submitting" "images.$role.claimed_by=$TAB_INDEX"
-
-# Race check: re-read status; if claimed_by != $TAB_INDEX, another worker won. Retry the claim phase.
-CLAIMED_BY=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id "images.$role.claimed_by")
-if [ "$CLAIMED_BY" != "$TAB_INDEX" ]; then continue; fi
-```
-
-Note: the claim is best-effort atomic. In a worst case, two workers race for the same task; the `claimed_by` re-check catches the loser and it just loops back. No wasted server credits because we haven't clicked Generate yet.
-
-### Prime phase (~2s)
-
-Read the prompt halves and concatenate:
-```bash
-CONCEPT=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id "images.$role.concept_prompt")
-STYLE=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id "images.$role.style_prompt")
+CONCEPT=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $SHOT_ID "images.$ROLE.concept_prompt")
+STYLE=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $SHOT_ID "images.$ROLE.style_prompt")
 FULL_PROMPT="$CONCEPT, $STYLE"
-python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id "images.$role.prompt=$FULL_PROMPT"
-ATT=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $shot_id "images.$role.attempts")
-python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id "images.$role.attempts=$((ATT+1))"
+
+# Record attempt and mark submitting
+python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $SHOT_ID "images.$ROLE.prompt=$FULL_PROMPT"
+ATT=$(python3 $SKILL_ROOT/engine/shot_state.py get "$OUTPUT_DIR/shots.json" $SHOT_ID "images.$ROLE.attempts")
+python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $SHOT_ID \
+  "images.$ROLE.attempts=$((ATT+1))" \
+  "images.$ROLE.status=submitting"
 ```
 
-Prime BOTH localStorage stores in one `browser_evaluate`:
+### Step 3 — Prime localStorage + reload + click (~5s)
+
+Single `browser_evaluate`:
 ```js
 (args) => {
-  // Prompt + generation options
   localStorage.setItem('hf:image-form-upd', JSON.stringify({
     prompt: args.full_prompt,
     enhance: true,
     withPrompt: true,
     seed: null
   }));
-  // Model / aspect / quality / unlimited
   const modelKey = 'hf:nano-banana-2-image-form-3';
   const cur = JSON.parse(localStorage.getItem(modelKey) || '{}');
-  cur.batch_size = 1;                   // critical: single image per submit (not 2 or 4)
+  cur.batch_size = 2;                        // ← Round 3: 2 variants per submit
   cur.aspect_ratio = args.aspect || '16:9';
   cur.quality = '2k';
   cur.use_unlimited = true;
@@ -100,77 +74,173 @@ Prime BOTH localStorage stores in one `browser_evaluate`:
 }
 ```
 
-Then reload the page: `browser_navigate` to `https://higgsfield.ai/ai/image?model=nano-banana-pro` (same URL — forces reload with primed state).
+Then `browser_navigate` back to `https://higgsfield.ai/ai/image?model=nano-banana-pro` (same URL — triggers reload with primed state). Wait 2s for hydration.
 
-Wait ~2s for page hydration.
-
-### Preflight + click (one `browser_evaluate`)
-
+Preflight + click (one `browser_evaluate`):
 ```js
 () => {
-  // Verify: prompt loaded, batch=1, unlimited on, model=NBP
   const ed = document.querySelector('[contenteditable="true"][role="textbox"]');
   const prompt_head = ed?.textContent?.slice(0, 60) || '';
   const sw = document.querySelector('[role="switch"]');
   const switch_on = sw?.getAttribute('data-state') === 'on';
+  // Note: the UI switch can silently reset on reload even though localStorage says use_unlimited=true.
+  // Click it once if needed, then re-read state.
+  if (!switch_on) {
+    sw?.closest('button')?.click();
+  }
   const submit_btn = document.getElementById('hf:image-form-submit');
-  if (!prompt_head || !switch_on || !submit_btn) {
-    return { preflight: 'FAIL', prompt_head_len: prompt_head.length, switch_on, has_btn: !!submit_btn };
+  if (!prompt_head || !submit_btn) {
+    return { preflight: 'FAIL', head_len: prompt_head.length, has_btn: !!submit_btn };
   }
   submit_btn.click();
   return { preflight: 'OK', prompt_head, submit_ts: new Date().toISOString() };
 }
 ```
 
-If preflight fails: retry the prime+reload ONCE. If still failing, mark `status=fail` with reason `preflight_failed:<which>`, record a technical review note, and claim the next task.
+If preflight fails, retry the prime+reload ONCE. If still failing, mark `status=fail` with reason `preflight_failed`, append a review note, report DONE.
 
-Record submission timestamp + flip status:
+Record `submitted_at` + flip `status=rendering`:
 ```bash
-python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $shot_id \
-  "images.$role.status=rendering" \
-  "images.$role.submitted_at=$SUBMITTED_AT"
+python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" $SHOT_ID \
+  "images.$ROLE.status=rendering" \
+  "images.$ROLE.submitted_at=$SUBMITTED_AT"
 ```
 
-### Wait-free continuation
+### Step 4 — Poll for TWO variants (~60–90s)
 
-**Do NOT poll for render completion here.** After clicking Generate, move back to the Claim phase immediately — there's probably another task queued (or about to be, as research streams in). Other workers (or the orchestrator's reviewer) will pick up the completion downstream.
+Poll every ~10s, up to 120s timeout. Because `batch_size=2`, NBP returns TWO thumbnails for your submission (usually within seconds of each other). Both share a common `submitted_at` timestamp in their filenames (`hf_<TS>_<uuid>_min.webp`) and both will have `ts >= your SUBMITTED_AT`.
 
-The orchestrator has a separate polling loop that:
-- Scans `img[alt="image generation"]` on the NBP tab it visits
-- Matches thumbnails to `images.<role>.submitted_at` in shots.json
-- Downloads completed images
-- Flips `status=rendered` and clears `submitted_at`
-- Dispatches stream reviewer
+```js
+() => {
+  const thumbs = Array.from(document.querySelectorAll('img[alt="image generation"]')).map(i => i.src);
+  const parsed = thumbs.map(s => {
+    const m = s.match(/hf_(\d{8}_\d{6})_([a-f0-9-]{36})_min\.webp/);
+    return m ? { ts: m[1], uuid: m[2] } : null;
+  }).filter(Boolean);
+  // Return all thumbnails with ts >= target
+  return parsed.filter(t => t.ts >= args.target_ts);
+}
+```
 
-You focus on submission throughput.
+When you have 2 thumbnails matching your submission, proceed. If only 1 appears after 90s (rare — usually both arrive together), continue with 1 variant and log the short batch in the reviews field.
 
-### Rate-limit sniffing
+### Step 5 — Download both variants (~3–5s)
 
-If you've submitted 3+ tasks recently and the `img[alt="image generation"]` list hasn't grown in 60s (check via one `browser_evaluate` when idle), suspect NBP rate-limit. Report `BLOCKED: suspected_rate_limit` with the count of in-flight submissions so the orchestrator can slow the submit cadence for the whole pool.
+```bash
+NN=$(printf "%02d" $SHOT_ID)
+UUID1=$VARIANT_1_UUID
+UUID2=$VARIANT_2_UUID
+TS1=$VARIANT_1_TS
+TS2=$VARIANT_2_TS
 
-## Termination
+BASE="https://d8j0ntlcm91z4.cloudfront.net/user_<PREFIX>"
+curl -sS -L --retry 3 -o "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.webp" \
+  "$BASE/hf_${TS1}_${UUID1}_min.webp"
+curl -sS -L --retry 3 -o "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.webp" \
+  "$BASE/hf_${TS2}_${UUID2}_min.webp"
+ffmpeg -v error -y -i "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.webp" "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.png"
+ffmpeg -v error -y -i "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.webp" "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.png"
+```
 
-Exit the loop and report DONE when:
-- No queued tasks in `shots.json` (all images are `submitting`/`rendering`/`rendered`/`pass`/`fail`/`escalated`)
-- AND the deadline since your last successful claim has elapsed (default 30s of idle)
+### Step 6 — Record variants array + status=rendered
 
-Report:
+Write the variants array into the shot's image slot. Use Python + shot_state.py dot-path updates (because `update` treats dicts carefully, and the variants array must be set atomically as a JSON list, not piecewise).
+
+Easiest: use a short Python helper that reads shots.json, mutates the image slot, and saves atomically:
+
+```bash
+python3 - <<PY
+import json
+from pathlib import Path
+path = Path("$OUTPUT_DIR/shots.json")
+shots = json.loads(path.read_text())
+for s in shots:
+    if s["id"] == $SHOT_ID:
+        img = s["images"]["$ROLE"]
+        img["variants"] = [
+            {"artifact_path": "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v0.png", "artifact_asset_id": "$UUID1"},
+            {"artifact_path": "$OUTPUT_DIR/shots/shot${NN}_${ROLE}_v1.png", "artifact_asset_id": "$UUID2"}
+        ]
+        img["selected_variant"] = None   # reviewer will set this in BATCH_PICK
+        img["status"] = "rendered"
+        img["submitted_at"] = None
+        break
+tmp = path.with_suffix(".tmp")
+tmp.write_text(json.dumps(shots, indent=2, ensure_ascii=False))
+tmp.rename(path)
+PY
+```
+
+If only 1 variant rendered (timeout case), the array has 1 entry; the reviewer only has one option to pick.
+
+### Step 7 — Report DONE
+
 ```
 DONE
+mode: single
 tab_index: <TAB_INDEX>
-claimed: <count of tasks this worker successfully submitted>
-claim_races_lost: <count of times a sibling worker won the claim>
-preflight_failures: <count>
-suspected_rate_limit: <Y/N>
+shot_id: <SHOT_ID>
+role: <ROLE>
+variants_downloaded: <1 or 2>
+elapsed_s: <wall clock from step 1 to here>
+```
+
+The orchestrator tracks all dispatched workers and waits for all to report DONE (or fail) before dispatching the reviewer.
+
+## Multi-task fallback (retry waves)
+
+When the orchestrator sends `TASKS` (array of `{shot_id, role}` pairs), loop through them sequentially using the Round 2 rapid-fire pattern:
+
+For each task:
+1. Steps 1–3 above (load prompt, prime, reload, click) — ~5s.
+2. Record `submitted_at`, move to next task immediately. Do NOT poll yet.
+3. After all submits, enter poll mode (step 4) for all tasks simultaneously.
+4. As each completes, download + record variants (steps 5–6).
+5. Report DONE when all finish or timeout.
+
+This fallback keeps the Round 2 fire-and-forget pattern alive for retry waves when the orchestrator doesn't want to spin up N new worker agents per wave.
+
+## Output variants
+
+On single-task success:
+```
+DONE
+mode: single
+tab_index: <idx>
+shot_id: <id>
+role: start|end
+variants_downloaded: 2
+elapsed_s: <n>
+```
+
+On single-task failure (preflight failed after retry):
+```
+DONE
+mode: single
+tab_index: <idx>
+shot_id: <id>
+role: start|end
+status: fail
+reason: preflight_failed:<which>
+```
+
+On multi-task fallback:
+```
+DONE
+mode: multi
+tab_index: <idx>
+processed: <N>
+rendered: <K>
+failed: <M>
 ```
 
 ## Never
 
-- Never clear + retype the prompt into the Lexical editor. That was the Round 1 bug source. Use localStorage priming + reload exclusively.
-- Never navigate, click, or read from any tab other than `TAB_INDEX`. Re-call `browser_tabs action=select` whenever you return from a Bash call that might have swapped tab focus.
-- Never touch the Unlimited toggle mid-batch unless you detect it silently flipped OFF. If it flipped, flip back once and verify. Do NOT click it as a routine.
-- Never skip preflight. If preflight reports FAIL, retry prime+reload once; second failure → mark fail and move on.
-- Never set `batch_size` > 1. That would render 2+ variants per submit and break the one-shot-to-one-UUID mapping the orchestrator depends on.
-- Never poll for render completion yourself. That's the orchestrator's job — it has the full map of submissions and can do it in one pass for all 6 workers' output.
+- Never clear + retype the prompt via Lexical editor. That's the Round 1 bug source. Use localStorage priming + reload exclusively.
+- Never navigate, click, or read from any tab other than `TAB_INDEX`. Re-call `browser_tabs action=select` whenever you return from a bash command.
+- Never touch the Unlimited toggle mid-poll (only at setup/reload). Toggle flickers are possible but benign during polling.
+- Never set `batch_size` to anything other than 2 in Round 3. batch_size=1 halves your effective pass rate; batch_size=4 doubles review cost.
+- Never skip recording the `variants` array. Downstream consumers (reviewer, video-worker, stitch) read `variants[selected_variant]`, NOT any top-level artifact field.
+- Never set `selected_variant` yourself — that's the reviewer's job in BATCH_PICK mode.
 - Never retry a failed shot semantically. The orchestrator + reviewer + prompt-writer loop owns retries.
-- Never modify shots you didn't claim. Atomic claim → submit → move on.
+- Never modify shots you didn't claim.

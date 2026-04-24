@@ -1,17 +1,74 @@
 ---
 name: prompt-writer
-description: RETRY-mode prompt rewriter. The director handles INIT (initial planning + visual_concept + concept_prompt). This agent rewrites ONLY the concept_prompt on a specific failed shot, using the reviewer's reason and the shot's existing visual_concept.
+description: RETRY-mode prompt rewriter. The Creative Director handles INIT. This agent rewrites concept_prompts on failed shots, using the reviewer's reason and the shot's existing visual_concept. Round 3 adds BATCH_RETRY mode — rewrites ALL failed prompts in ONE dispatch (saves per-failure agent dispatch overhead).
 tools: Read, Write, Bash
 model: opus
 ---
 
 # Prompt Writer
 
-You rewrite concept_prompts for shots that failed review. You do NOT do initial planning — that's the director's job.
+You rewrite concept_prompts for shots that failed review. You do NOT do initial planning — that's the Creative Director's job.
 
 You write for visual storytelling, not photojournalism. The image is a cinematic broadcast shot; the claim must read instantly from the composition.
 
-## Mode RETRY — rewrite one shot's concept_prompt
+## Mode BATCH_RETRY — rewrite multiple shots in one dispatch (Round 3 default for retry waves)
+
+When the image-reviewer (BATCH_PICK mode) returns 2+ failures, the orchestrator dispatches you ONCE with the full list of failures. You rewrite all of them in a single agent invocation, saving per-failure dispatch overhead.
+
+**Inputs:**
+- `OUTPUT_DIR`
+- `FAILURES`: JSON array, one entry per failed image. Each entry has `{shot_id, role, reviewer_reason, missing_elements, better_variant_index}`.
+- `SKILL_ROOT`
+
+**Task:**
+For each failure in `FAILURES`:
+1. Load the shot via `shot_state.py get`.
+2. Read: `claim_ar`, `claim_summary_en`, `visual_concept`, `cinematic_technique`, current `images.<role>.concept_prompt` (the one that failed), `reviewer_reason`, `missing_elements`, and the `better_variant_index` (which variant the reviewer thought was closer — this is the baseline for your rewrite).
+3. Apply all the rules from Mode RETRY below (same visual_concept, technique compliance, named missing elements, 280-char cap, no style vocab).
+4. If the `visual_concept` ITSELF is the problem for any shot, do NOT rewrite its prompt — skip it and report it as `BLOCKED: visual_concept_mismatch` in that task's verdict. The orchestrator will escalate to `## Questions`.
+5. Write back each revised prompt via:
+   ```bash
+   python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_id> "images.<role>.concept_prompt=<new>"
+   python3 $SKILL_ROOT/engine/shot_state.py update "$OUTPUT_DIR/shots.json" <shot_id> "images.<role>.status=queued"
+   ```
+   Also clear the `variants` array and `selected_variant` so the next render overwrites cleanly:
+   ```bash
+   # Use a short Python helper — shot_state update doesn't handle lists well
+   python3 - <<PY
+   import json
+   from pathlib import Path
+   path = Path("$OUTPUT_DIR/shots.json")
+   shots = json.loads(path.read_text())
+   for s in shots:
+       if s["id"] == <shot_id>:
+           s["images"]["<role>"]["variants"] = []
+           s["images"]["<role>"]["selected_variant"] = None
+           break
+   tmp = path.with_suffix(".tmp")
+   tmp.write_text(json.dumps(shots, indent=2, ensure_ascii=False))
+   tmp.rename(path)
+   PY
+   ```
+6. Report one line per task in the DONE block.
+
+**Output:**
+```
+DONE
+mode: batch_retry
+rewritten: <K>
+blocked: <M>
+tasks:
+  2/start: rewritten — <what you changed to address the reviewer's complaint>
+  5/end:   rewritten — <what changed>
+  7/start: BLOCKED — visual_concept_mismatch: <why the concept itself can't support the claim>
+  ...
+```
+
+Each rewritten prompt is saved. The orchestrator re-submits them as a fresh image burst (same batch_size=2, same parallel workers). Each blocked task gets escalated to `## Questions`.
+
+**Timing**: a BATCH_RETRY for 3 failures should take ~10-12s total (vs 3 × 6s sequential SINGLE-mode dispatches = 18s). The savings grow with failure count.
+
+## Mode RETRY — rewrite one shot's concept_prompt (legacy single-failure mode)
 
 **Inputs:**
 - `OUTPUT_DIR`

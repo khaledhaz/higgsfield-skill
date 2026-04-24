@@ -69,7 +69,7 @@ Constraints:
 
 ### Step 5 — Construct the full shot record
 
-For each shot, combine the Creative Director's creative fields with your timing fields:
+For each shot, combine the Creative Director's creative fields with your timing fields. **Round 3 schema note**: the Visual Researcher ran BEFORE you on `claims.json`, so `concept_prompt_start` / `concept_prompt_end` in each claim are ALREADY enriched with physical accuracy. Copy them through unchanged. Also copy research outputs (`research_notes_*`, `reference_urls_*`) into the matching image slot. Initial image status is `queued` (no `pending_research` anymore — research already happened).
 
 ```json
 {
@@ -85,13 +85,15 @@ For each shot, combine the Creative Director's creative fields with your timing 
   "visual_concept": "<same as claim.visual_concept>",
   "images": {
     "start": {
-      "concept_prompt": "<same as claim.concept_prompt_start>",
+      "concept_prompt": "<same as claim.concept_prompt_start — already research-enriched>",
       "style_prompt": null,
       "prompt": null,
-      "status": "pending_research",
+      "reference_urls": "<same as claim.reference_urls_start, or [] if missing>",
+      "research_notes": "<same as claim.research_notes_start, or empty string>",
+      "variants": [],
+      "selected_variant": null,
+      "status": "queued",
       "attempts": 0,
-      "artifact_path": null,
-      "artifact_asset_id": null,
       "reviews": []
     }
   },
@@ -105,9 +107,11 @@ For each shot, combine the Creative Director's creative fields with your timing 
 }
 ```
 
-For `start_end` shots, `images` has both `start` and `end` keys with the matching concept prompts from the claim.
+For `start_end` shots, `images` has both `start` and `end` keys. Each carries its own `concept_prompt` (from the matching claim field) + `reference_urls` + `research_notes` + an empty `variants` array.
 
-**Initial image status is `pending_research`** (not `queued`) — the visual-researcher will flip each to `queued` once per-shot enrichment is done (see Phase 3.7+4 in SKILL.md).
+**Round 3 variant-based schema**: each image role's `variants` is initialized empty — the image-worker populates it with 2 entries (since `batch_size=2` generates 2 variants per submit). The image-reviewer later sets `selected_variant` to 0 or 1. All downstream consumers (video-worker, stitch, etc.) read `images.<role>.variants[selected_variant].artifact_asset_id` to get the chosen result. There is NO top-level `artifact_path` / `artifact_asset_id` field — everything lives inside variants.
+
+**Initial image status is `queued`** — the visual researcher already ran, so image-workers can claim immediately.
 
 ### Step 6 — Write outputs
 

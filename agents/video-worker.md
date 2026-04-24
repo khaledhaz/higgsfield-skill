@@ -48,7 +48,15 @@ For each `shot_id` you've claimed (either from `INITIAL_SHOT_IDS` or from a queu
    - `video.status` is in `{"queued","claimed_*"}` (not already `rendering`/`rendered`/`pass`)
    - `images.start.status == "pass"`
    - if `technique == "start_end"`: `images.end.status == "pass"`
-   - Also read: `video_prompt`, `technique`, `images.start.artifact_asset_id`, `images.end.artifact_asset_id` (if start_end), `duration`.
+   - Also read: `video_prompt`, `technique`, `duration`.
+   - **Round 3 variant lookup**: instead of reading `images.<role>.artifact_asset_id` directly, read the SELECTED variant's asset id (batch_size=2 generates 2 variants; the reviewer picked one via `selected_variant`):
+     ```bash
+     START_ASSET=$(python3 $SKILL_ROOT/engine/shot_state.py selected_variant "$OUTPUT_DIR/shots.json" $shot_id start artifact_asset_id)
+     if [ "$technique" = "start_end" ]; then
+       END_ASSET=$(python3 $SKILL_ROOT/engine/shot_state.py selected_variant "$OUTPUT_DIR/shots.json" $shot_id end artifact_asset_id)
+     fi
+     ```
+     The `selected_variant` helper prints the chosen variant's `artifact_asset_id`. If it errors (no selected variant), the reviewer hasn't run for this shot yet — fail this claim with `reason: variant_not_selected` and let the orchestrator retry.
 
 2. **Derive Kling duration**:
    ```python
@@ -60,14 +68,14 @@ For each `shot_id` you've claimed (either from `INITIAL_SHOT_IDS` or from a queu
 
 3. `browser_tabs action=select, index=$TAB_INDEX`.
 
-4. Prime BOTH localStorage stores atomically:
+4. Prime BOTH localStorage stores atomically. Note: `start_image_asset_id` and `end_image_asset_id` come from the SELECTED variants you fetched above:
    ```js
    (args) => {
      const formKey = Object.keys(localStorage).find(k => k.startsWith('flow-create-video-'));
      const form = JSON.parse(localStorage.getItem(formKey) || '{}');
      form.prompt = args.video_prompt;
-     form.inputImage = args.start_image_asset_id;
-     form.endImage = args.end_image_asset_id || null;
+     form.inputImage = args.start_image_asset_id;   // selected variant's UUID
+     form.endImage = args.end_image_asset_id || null; // selected variant's UUID (start_end) or null
      form.modelVersion = 'kling3_0';
      localStorage.setItem(formKey, JSON.stringify(form));
 

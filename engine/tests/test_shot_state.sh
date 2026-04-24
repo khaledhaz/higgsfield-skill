@@ -99,12 +99,13 @@ python3 -c "import json; d=json.load(open('$SF')); d[0]['reviews']={'image':[],'
 
 # Case 13: next_video_ready — atomically claim lowest-id shot whose video is queued and all image roles passed
 SF2="$FIX_DIR/shots_vr.json"
+# Round 3: next_video_ready now requires selected_variant to be set (int in range), not just status=pass.
 cat > "$SF2" <<'EOF'
 [
-  {"id": 1, "technique": "start_only", "images": {"start": {"status": "pass"}}, "video": {"status": "queued"}},
-  {"id": 2, "technique": "start_end",  "images": {"start": {"status": "pass"}, "end": {"status": "rendered"}}, "video": {"status": "queued"}},
-  {"id": 3, "technique": "start_only", "images": {"start": {"status": "pass"}}, "video": {"status": "queued"}},
-  {"id": 4, "technique": "start_end",  "images": {"start": {"status": "pass"}, "end": {"status": "pass"}},     "video": {"status": "queued"}}
+  {"id": 1, "technique": "start_only", "images": {"start": {"status": "pass", "variants": [{"artifact_asset_id":"a"},{"artifact_asset_id":"b"}], "selected_variant": 0}}, "video": {"status": "queued"}},
+  {"id": 2, "technique": "start_end",  "images": {"start": {"status": "pass", "variants": [{"artifact_asset_id":"c"},{"artifact_asset_id":"d"}], "selected_variant": 0}, "end": {"status": "rendered", "variants": [], "selected_variant": null}}, "video": {"status": "queued"}},
+  {"id": 3, "technique": "start_only", "images": {"start": {"status": "pass", "variants": [{"artifact_asset_id":"e"},{"artifact_asset_id":"f"}], "selected_variant": 1}}, "video": {"status": "queued"}},
+  {"id": 4, "technique": "start_end",  "images": {"start": {"status": "pass", "variants": [{"artifact_asset_id":"g"},{"artifact_asset_id":"h"}], "selected_variant": 0}, "end": {"status": "pass", "variants": [{"artifact_asset_id":"i"},{"artifact_asset_id":"j"}], "selected_variant": 1}}, "video": {"status": "queued"}}
 ]
 EOF
 
@@ -131,5 +132,67 @@ echo "PASS test_shot_state next-video-ready-start-end-ok"
 c=$(python3 "$SS" next_video_ready "$SF2" D)
 [ -z "$c" ] || { echo "FAIL: next_video_ready when none ready: got '$c' (expected empty)"; exit 1; }
 echo "PASS test_shot_state next-video-ready-none"
+
+# Round 3: next_video_ready must also skip shots whose status=pass but selected_variant=null
+SF3="$FIX_DIR/shots_vr_pending_select.json"
+cat > "$SF3" <<'EOF'
+[
+  {"id": 1, "technique": "start_only",
+   "images": {"start": {"status": "pass", "variants": [{"artifact_asset_id":"x"},{"artifact_asset_id":"y"}], "selected_variant": null}},
+   "video": {"status": "queued"}},
+  {"id": 2, "technique": "start_only",
+   "images": {"start": {"status": "pass", "variants": [{"artifact_asset_id":"a"},{"artifact_asset_id":"b"}], "selected_variant": 0}},
+   "video": {"status": "queued"}}
+]
+EOF
+c=$(python3 "$SS" next_video_ready "$SF3" X)
+[ "$c" = "2" ] || { echo "FAIL: next_video_ready should skip selected_variant=null: got '$c' (expected 2)"; exit 1; }
+echo "PASS test_shot_state next-video-ready-gates-selected-variant"
+
+# Round 3: set_variant / selected_variant — variant-based batch_size=2 support
+SFV="$FIX_DIR/shots_variants.json"
+cat > "$SFV" <<'EOF'
+[
+  {"id": 1, "technique": "start_only",
+   "images": {"start": {
+     "status": "rendered",
+     "variants": [
+       {"artifact_path": "/tmp/shot01_start_v1.png", "artifact_asset_id": "uuid-aaa"},
+       {"artifact_path": "/tmp/shot01_start_v2.png", "artifact_asset_id": "uuid-bbb"}
+     ],
+     "selected_variant": null
+   }}}
+]
+EOF
+
+# Before set_variant, selected_variant returns error
+if python3 "$SS" selected_variant "$SFV" 1 start 2>/dev/null; then echo "FAIL: selected_variant with no selection should error"; exit 1; fi
+echo "PASS test_shot_state selected-variant-none-errors"
+
+# set_variant 1 → index 1
+python3 "$SS" set_variant "$SFV" 1 start 1
+idx=$(python3 -c "import json; d=json.load(open('$SFV')); print(d[0]['images']['start']['selected_variant'])")
+[ "$idx" = "1" ] || { echo "FAIL: set_variant: got '$idx' (expected 1)"; exit 1; }
+echo "PASS test_shot_state set-variant"
+
+# selected_variant returns the variant
+uuid=$(python3 "$SS" selected_variant "$SFV" 1 start artifact_asset_id)
+[ "$uuid" = "uuid-bbb" ] || { echo "FAIL: selected_variant field: got '$uuid' (expected uuid-bbb)"; exit 1; }
+path=$(python3 "$SS" selected_variant "$SFV" 1 start artifact_path)
+[ "$path" = "/tmp/shot01_start_v2.png" ] || { echo "FAIL: selected_variant path: got '$path'"; exit 1; }
+echo "PASS test_shot_state selected-variant-field"
+
+# selected_variant with no field returns whole object
+whole=$(python3 "$SS" selected_variant "$SFV" 1 start)
+echo "$whole" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); assert d['artifact_asset_id']=='uuid-bbb'" || { echo "FAIL: selected_variant whole"; exit 1; }
+echo "PASS test_shot_state selected-variant-whole"
+
+# set_variant out-of-range → nonzero exit
+if python3 "$SS" set_variant "$SFV" 1 start 5 2>/dev/null; then echo "FAIL: out-of-range set_variant should error"; exit 1; fi
+echo "PASS test_shot_state set-variant-out-of-range"
+
+# set_variant on role that doesn't exist → nonzero exit
+if python3 "$SS" set_variant "$SFV" 1 end 0 2>/dev/null; then echo "FAIL: missing role set_variant should error"; exit 1; fi
+echo "PASS test_shot_state set-variant-missing-role"
 
 echo "ALL PASSED: shot_state"

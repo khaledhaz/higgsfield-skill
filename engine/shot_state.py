@@ -16,6 +16,11 @@ Subcommands:
   mark_attempt <path> <shot_id> <stage>       # increments attempts.<stage>
   get <path> <shot_id> [<dot-path>]           # prints field value or whole shot JSON
 
+  # Round 3 variant helpers (batch_size=2 support):
+  set_variant <path> <shot_id> <role> <index>         # record images.<role>.selected_variant = <index>
+  selected_variant <path> <shot_id> <role> [field]    # print the selected variant's artifact_path / artifact_asset_id
+                                                      # (or the whole variant object if no field given)
+
 All file writes are atomic (tempfile + replace).
 """
 import json
@@ -137,12 +142,23 @@ def cmd_next_video_ready(path: Path, worker_tag: str) -> int:
 
     A shot is 'video-ready' iff:
       - video.status == "queued"
-      - images.start.status == "pass"
-      - if technique == "start_end": images.end.status == "pass"
+      - images.start.status == "pass" AND selected_variant is a valid int
+      - if technique == "start_end": images.end.status == "pass" AND selected_variant is a valid int
+
+    The selected_variant gate (Round 3) prevents a race where the reviewer marks status=pass
+    but hasn't written selected_variant yet — a claim then would fail when the video-worker
+    tries to look up the asset UUID.
 
     On match, atomically set video.status = f"claimed_{worker_tag}" and print the shot id.
     On no match, print nothing (exit 0).
     """
+    def _role_ok(img: dict) -> bool:
+        if img.get("status") != "pass":
+            return False
+        idx = img.get("selected_variant")
+        variants = img.get("variants") or []
+        return isinstance(idx, int) and 0 <= idx < len(variants)
+
     shots = _load(path)
     for s in sorted(shots, key=lambda x: int(x["id"])):
         video_status = s.get("video", {}).get("status", "queued")
@@ -150,11 +166,11 @@ def cmd_next_video_ready(path: Path, worker_tag: str) -> int:
             continue
         images = s.get("images", {}) or {}
         start_img = images.get("start") or {}
-        if start_img.get("status") != "pass":
+        if not _role_ok(start_img):
             continue
         if s.get("technique") == "start_end":
             end_img = images.get("end") or {}
-            if end_img.get("status") != "pass":
+            if not _role_ok(end_img):
                 continue
         # Claim atomically
         s.setdefault("video", {})["status"] = f"claimed_{worker_tag}"
@@ -178,6 +194,54 @@ def cmd_mark_attempt(path: Path, shot_id: int, stage: str) -> int:
     attempts = shot.setdefault("attempts", {})
     attempts[stage] = attempts.get(stage, 0) + 1
     _save(path, shots)
+    return 0
+
+
+def cmd_set_variant(path: Path, shot_id: int, role: str, index: int) -> int:
+    """Record the chosen variant index for images.<role> (Round 3 batch_size=2 pick)."""
+    if role not in ("start", "end"):
+        print(f"Error: role must be start or end, got '{role}'", file=sys.stderr)
+        return 2
+    shots = _load(path)
+    shot = _find(shots, shot_id)
+    img = shot.get("images", {}).get(role)
+    if not img:
+        print(f"Error: shot {shot_id} has no images.{role}", file=sys.stderr)
+        return 1
+    variants = img.get("variants") or []
+    if not 0 <= index < len(variants):
+        print(f"Error: index {index} out of range for {len(variants)} variants", file=sys.stderr)
+        return 1
+    img["selected_variant"] = index
+    _save(path, shots)
+    return 0
+
+
+def cmd_selected_variant(path: Path, shot_id: int, role: str, field) -> int:
+    """Print the selected variant's field (or the whole variant object)."""
+    if role not in ("start", "end"):
+        print(f"Error: role must be start or end, got '{role}'", file=sys.stderr)
+        return 2
+    shots = _load(path)
+    shot = _find(shots, shot_id)
+    img = shot.get("images", {}).get(role)
+    if not img:
+        print(f"Error: shot {shot_id} has no images.{role}", file=sys.stderr)
+        return 1
+    variants = img.get("variants") or []
+    idx = img.get("selected_variant")
+    if idx is None or not 0 <= idx < len(variants):
+        print(f"Error: shot {shot_id}/{role} has no selected variant", file=sys.stderr)
+        return 1
+    variant = variants[idx]
+    if field is None:
+        print(json.dumps(variant, ensure_ascii=False))
+    else:
+        val = variant.get(field)
+        if val is None:
+            print(f"Error: variant has no field '{field}'", file=sys.stderr)
+            return 1
+        print(val)
     return 0
 
 
@@ -217,6 +281,10 @@ def main() -> int:
             return cmd_attempts(path, int(argv[2]), argv[3])
         if cmd == "mark_attempt":
             return cmd_mark_attempt(path, int(argv[2]), argv[3])
+        if cmd == "set_variant":
+            return cmd_set_variant(path, int(argv[2]), argv[3], int(argv[4]))
+        if cmd == "selected_variant":
+            return cmd_selected_variant(path, int(argv[2]), argv[3], argv[4] if len(argv) > 4 else None)
         if cmd == "get":
             return cmd_get(path, int(argv[2]), argv[3] if len(argv) > 3 else None)
     except (FileNotFoundError, KeyError, ValueError, IndexError, AttributeError, TypeError) as e:

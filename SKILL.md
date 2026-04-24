@@ -133,15 +133,32 @@ Both must DONE before proceeding. Typical wall clock: ~45s (VO is the long pole;
 - If ≥4 claims: at least 2 distinct `cinematic_technique` values.
 - Every `concept_prompt_start` (and `_end` if present) is ≤280 chars with no style/grain/palette/lighting vocabulary.
 
+### Phase 2.6 — Visual research (runs DURING Whisper window, on claims.json)
+
+**Round 3 structural move**: research now happens on `claims.json` — BEFORE shots.json exists — in the time window between claims.json completion (t=45) and Whisper completion (t=82). Research overlaps with Whisper entirely, eliminating the research→submission serial cascade that Round 2 still had.
+
+As soon as the Creative Director reports DONE and claims.json is written:
+
+1. Count claims. If `len(claims) ≥ 4`, dispatch TWO `visual-researcher` agents in parallel (one message, two Agent calls):
+   - Researcher A: `CLAIM_RANGE=[1, ceil(N/2)]`, `SEARCH_BUDGET=10`
+   - Researcher B: `CLAIM_RANGE=[ceil(N/2)+1, N]`, `SEARCH_BUDGET=10`
+   If `len(claims) < 4`, dispatch a single researcher with no range and default budget 20.
+
+2. Each researcher reads `concept_prompt_start` / `concept_prompt_end` from claims.json and writes enriched versions back in place. Also writes `reference_urls_start/end` and `research_notes_start/end` into the claim records.
+
+3. Whisper (Phase 2) and research run CONCURRENTLY. Since Whisper is ~25s and parallel research is ~20-25s, both complete roughly together around t=70-82.
+
+**No markers, no pending_research status**. By the time the Shot Planner runs in Phase 3, every claim's concept prompts are already accuracy-enriched. The Shot Planner copies them straight into `shots.json` with `images.<role>.status = "queued"` — images are immediately submittable.
+
 ### Phase 2 — VO analysis (dispatch `vo-analyst`)
 
 After VO download + probe, dispatch `vo-analyst` with `VAULT_DIR`, `OUTPUT_DIR`, `SCRIPT_PATH`. On DONE, read `beats.json` and render the markdown table for `<!-- engine:beats -->`.
 
-Typical wall clock: ~25s (Whisper medium locally).
+Typical wall clock: ~25s (Whisper medium locally). Research (Phase 2.6) runs in parallel during this window.
 
 ### Phase 3 — Shot Planner (dispatch `shot-planner` — fast Sonnet)
 
-After BOTH Phase 2 (beats.json) AND Phase 2.5 (claims.json) are complete, dispatch `shot-planner` with `CLAIMS_PATH`, `BEATS_PATH`, `VO_DURATION`, `SKILL_ROOT`.
+After BOTH Phase 2 (beats.json) AND Phase 2.6 (research-enriched claims.json) are complete, dispatch `shot-planner` with `CLAIMS_PATH`, `BEATS_PATH`, `VO_DURATION`, `SKILL_ROOT`.
 
 The Shot Planner is pure constraint satisfaction:
 - Fuzzy-matches each claim's `claim_ar` against the beat timings.
@@ -149,17 +166,18 @@ The Shot Planner is pure constraint satisfaction:
 - Splits any single claim that spans >15s of beats into multiple shots (all sharing the same visual concept).
 - Assigns exact float durations so `sum(shot.duration) === VO_DURATION` (±0.01s).
 - Honors the last-shot tail rule (`duration ≤14s` so +1s Kling pad stays ≤15s).
-- Writes `shots.json` with `images.<role>.status = "pending_research"` (see Phase 3.7+4 below).
+- Copies research-enriched `concept_prompt_start/end` plus `reference_urls_*` and `research_notes_*` from claims.json into `shots.json` image slots.
+- Writes `shots.json` with `images.<role>.status = "queued"` (Round 3 — research already done) and `images.<role>.variants = []` (image-worker populates with 2 variants later).
 
 Typical wall clock: ~15s (Sonnet, no creative thinking needed).
 
 **Invariants the orchestrator verifies on `shots.json`**:
 - `sum(shot.duration) === VO_DURATION` (±0.01s).
-- Every beat covered by ≥1 shot (`beat_ids` tile the beats).
+- Every beat covered by ≥1 shot.
 - Every shot has non-empty `visual_concept` + `cinematic_technique` from the allowed set.
-- Technique-variety rule holds (same as before; Creative Director's output should already satisfy it).
+- Technique-variety rule holds.
 - Last shot `duration ≤14s`.
-- Every image has `concept_prompt` ≤280 chars, no style vocab, `style_prompt=null`, `prompt=null`, `status="pending_research"`.
+- Every image has `concept_prompt` ≤280 chars, no style vocab, `style_prompt=null`, `prompt=null`, `status="queued"`, `variants=[]`, `selected_variant=null`.
 
 ### Phase 3.5 — Style injection (instant — string already built)
 
@@ -182,99 +200,134 @@ Also **pre-build the stitch manifest template** right here:
 ```
 Save as `$OUTPUT_DIR/manifest_template.json`. Phase 5 will fill in clip paths as videos download; Phase 6 runs stitch without any extra setup.
 
-### Phase 3.7 + Phase 4 + Phase 5 — Research ∥ Images ∥ Videos (fully interleaved)
+### Phase 4 — Image burst + BATCH_PICK review + BATCH_RETRY (Round 3)
 
-The Round 2 pipelining collapses all three downstream phases into one interleaved block. Research completions stream → images submit as each shot gets enriched → image reviews stream → videos submit as each shot's images pass. No phase has a "wait for all of previous phase" gate.
+Round 3 collapses the image phase into a single simultaneous burst. Research already ran (Phase 2.6), so every concept_prompt is enriched when Phase 3 finishes. Shot Planner writes `shots.json` with all images `status=queued`. The orchestrator immediately fires N image-workers — one per image task, all in one message — and they prime+reload+click in parallel. `batch_size=2` in localStorage means each submission produces TWO rendered variants. The reviewer picks the better variant per image in a single BATCH_PICK dispatch.
 
-#### Tab pre-warming (started during Phase 0, completes during Phase 1)
+#### Tab pre-warming (sized to the image count, Round 3)
 
-At the end of Phase 0, kick off a background tab-warmup: open 6 Chrome tabs and navigate each to `https://higgsfield.ai/ai/image?model=nano-banana-pro`. Verify the Unlimited toggle is ON for each tab. This takes ~15s but runs in parallel with VO gen (45s) and Creative Director (40s), so it adds no wall time.
+At the end of Phase 0, the orchestrator counts image tasks from the Creative Director's DONE report (`total_images_to_gen`) and kicks off tab pre-warming for that many tabs, capped at 10:
 
-By the time Phase 3.7+4 starts (~t=95s), all 6 tabs are ready. Workers skip setup.
+```
+N_tabs = min(total_image_tasks, 10)
+for i in 0..N_tabs-1:
+  browser_tabs action=create
+  browser_navigate (on each) to https://higgsfield.ai/ai/image?model=nano-banana-pro
+  verify Unlimited toggle ON
+```
+
+Tabs warm up in parallel with VO + Creative Director + Whisper + research. By the time Phase 4 starts (~t=99), all N tabs are ready.
 
 #### Step-by-step orchestration
 
-1. **Dispatch 2 parallel visual-researchers** (if ≥4 shots):
-   - Researcher A: `SHOT_RANGE=[1, ceil(N/2)]`, `SEARCH_BUDGET=10`
-   - Researcher B: `SHOT_RANGE=[ceil(N/2)+1, N]`, `SEARCH_BUDGET=10`
-   - If <4 shots, single researcher with default budget 20.
+1. **Dispatch N image-workers in ONE orchestrator turn** (N = total_image_tasks ≤ 10). Each gets a distinct `TAB_INDEX` and exactly one `{shot_id, role}` task (single-task mode — see `agents/image-worker.md`).
 
-   Each researcher emits a per-shot completion marker: `$OUTPUT_DIR/.research_markers/shot_<id>.done` after finishing ALL roles of that shot (start, and end if start_end).
+   The orchestrator sends N Agent tool calls in a single message. Each worker:
+   - Attaches to its pre-warmed tab.
+   - Loads the concept+style prompt.
+   - Primes `hf:image-form-upd` + `hf:nano-banana-2-image-form-3` (with `batch_size: 2`).
+   - Reloads, preflights, clicks Generate.
+   - Polls for its 2 variants (by submission timestamp).
+   - Downloads both variants.
+   - Records them as `images.<role>.variants = [{path, uuid}, {path, uuid}]` with `selected_variant=null`.
+   - Marks `status=rendered`.
+   - Reports DONE.
 
-2. **Dispatch 6 image-workers** (in the same orchestrator turn as step 1):
-   - Each gets its own `TAB_INDEX` (0..5) and starts in IDLE polling mode on its pre-warmed tab.
-   - Workers poll `shots.json` every ~3s for any image with `status == "queued"` and atomically claim via `status=submitting`, `claimed_by=<TAB_INDEX>`.
+   All N workers click Generate within ~4s of each other. All N renders run server-side simultaneously, completing ~60-90s later.
 
-3. **Orchestrator watcher loop** (runs concurrently with 1 and 2, ~3s tick):
-   For each tick:
-   - **Scan for new research markers**: `ls $OUTPUT_DIR/.research_markers/*.done`. For each new marker:
-     - Run the per-shot invariant check on that shot's concept_prompts (≤280 chars, no style vocab, no "no text/logos" phrasing, director fields unchanged).
-     - On pass: for every role in that shot, flip `images.<role>.status` from `pending_research` to `queued`. Workers will pick up within ~3s.
-     - On fail: revert the shot's concept_prompt to pre-research value, log to `research_log.md`, still flip to `queued` (downstream reviewer will still run).
-     - Delete the marker file to avoid re-processing.
-   - **Scan for completed image renders**: read `shots.json` for any `status == "rendering"` with `submitted_at` older than ~15s. On the NBP tab, check `img[alt="image generation"]` list for thumbnails matching those submissions. For each match:
-     - Download the webp → convert to png → record `artifact_path` + `artifact_asset_id` + `status=rendered`, clear `submitted_at`.
-     - Dispatch `image-reviewer` in SINGLE mode for that `(shot_id, role)`.
-   - **Scan for completed reviews**: for each review PASS, set `images.<role>.status=pass`. For each FAIL, dispatch `prompt-writer` RETRY (if attempts < cap) which rewrites the concept_prompt, resets status to `queued`, and the workers re-submit. Cap-hit → escalate.
-   - **Scan for video-ready shots**: use `next_video_ready` helper. If a shot is ready and a video-worker isn't running on its dedicated tab, spawn one (reuse a freed image-worker tab).
+2. **Wait for all N workers to report DONE** (or fail). Typical wall clock for the burst: ~80-100s. All 2N variants are on disk.
 
-4. **Image-worker internals**: see `agents/image-worker.md` — the worker uses **localStorage priming** (not Lexical editor manipulation) for the prompt. Key primitives:
-   - `hf:image-form-upd`: `{prompt, enhance: true, withPrompt: true, seed: null}`
-   - `hf:nano-banana-2-image-form-3`: `{batch_size: 1, aspect_ratio, quality: "2k", use_unlimited: true, use_seedream_bonus: false}`
-   - Reload → preflight → click submit. ~3s per submission. **This eliminates the Lexical race bug from Round 1.**
+3. **Dispatch one BATCH_PICK reviewer** for all N image tasks in one Agent call. The reviewer:
+   - Reads both variants per image.
+   - Evaluates each against the full rubric (visual_concept match, technique compliance, accuracy, count rules).
+   - Picks the better variant (`set_variant <shot_id> <role> <index>`).
+   - Marks `status=pass` (or `fail` if neither variant works).
+   - For `start_end` morph pairs, verifies coherence across the selected start+end variants.
+   - Returns a per-task verdict block.
 
-5. **Video-worker internals** (unchanged from Round 1): see `agents/video-worker.md`. Uses `next_video_ready` to claim a shot atomically, primes `flow-create-video-<date>` + `hf:video-kling-3-store:v2`, reloads, preflight, Generate. Tab reuse protocol unchanged.
+   Typical wall clock: ~15-20s (vs N × 5s of stream review in Round 2).
 
-6. **Stream reviewers** (unchanged from Round 1): `image-reviewer` SINGLE and `video-reviewer` SINGLE dispatched per completion.
+4. **If any images failed**: dispatch ONE `prompt-writer` in `BATCH_RETRY` mode with the full failure list. The prompt-writer rewrites all failed concept_prompts in a single agent call, clears each failed image's `variants=[]` and `selected_variant=null`, and sets `status=queued`. Typical wall clock: ~10-12s.
 
-7. **Manifest filling** (new): as each video downloads, open `manifest_template.json` and write the clip's `path` field in-place. When the last video downloads, the manifest is already complete — no post-processing needed.
+5. **Retry burst**: dispatch a fresh wave of N_retry image-workers (one per failed task) in one message, same single-task pattern. Same BATCH_PICK review after. Repeat up to `retries_per_shot` times; cap-hit → escalate to `## Questions`.
 
-#### Timeline for a 6-shot / 8-image project
+   Usually the first batch_size=2 pass clears ≥75% of images, so retries are 0-2 shots total. With batch_size=2 on the retry, both-variant-failure is rare (~12%). One retry wave is usually enough.
+
+6. **Manifest filling** (unchanged from Round 2): as video clips download later, fill in `manifest_template.json`'s clip paths in place.
+
+#### Phase 5 — Videos (unchanged except for variant lookup)
+
+As each shot's images all pass review (`status=pass` + `selected_variant` set), the video becomes `video_ready`. Video-workers claim via `next_video_ready` (which now also gates on `selected_variant` being valid). Each video-worker reads the SELECTED variant's asset UUID for `inputImage` / `endImage`:
+
+```bash
+START_UUID=$(shot_state.py selected_variant shots.json <id> start artifact_asset_id)
+END_UUID=$(shot_state.py selected_variant shots.json <id> end artifact_asset_id)  # if start_end
+```
+
+Rest of video flow identical to Round 2: localStorage priming (`flow-create-video-<date>` + `hf:video-kling-3-store:v2`), reload, preflight, Generate. Stream review per completion. Tab reuse from freed image-worker tabs.
+
+#### Timeline for a 6-shot / 8-image project (Round 3)
 
 ```
-t=0    Intake + Style string built + tab warmup kicked off
-t=5    VO gen starts ──────────────────────┐
-t=5    Creative Director starts           ──┤ PARALLEL
-t=5    6 tabs warming                     ──┘
-t=20   Tabs ready (standing by)
+t=0    Intake + style string + script.txt + tab warmup kickoff       5s
+t=5    VO gen (45s)                                       ──┐
+t=5    Creative Director (40s)                            ──┤ PARALLEL
+t=5    N NBP tabs warming (~15s)                          ──┘
+t=20   All N tabs ready
 t=45   Creative Director DONE → claims.json
-t=50   VO DONE → downloaded
-t=57   Whisper vo-analyst starts
+t=45   Research A + B dispatched (parallel, on claims.json) ─┐
+t=50   VO downloaded                                          │ PARALLEL
+t=57   Whisper starts                                         │
+t=70   Research DONE → claims.json enriched                  ─┘
 t=82   Whisper DONE → beats.json
-t=82   Shot Planner starts → shots.json
+t=82   Shot Planner (15s)
 t=97   shots.json + style injected + manifest template ready
-t=99   Research A + B dispatched
-t=99   6 image-workers dispatched (IDLE polling)
-t=109  Shot 1 marker → queued → Worker submits (3s prime+reload+click)
-t=112  Image 1 rendering server-side
-t=115  Shot 4 marker → queued → Worker 1 submits
-...
-t=137  All 8 images submitted
-t=172  Image 1 rendered → reviewed PASS → video 1 submitted
-t=297  Video 1 rendered → reviewed PASS → manifest template updated
-...
-t=315  Last video ready, manifest complete
-t=317  Stitch (15s)
-t=332  DONE  (≈5.5 min total)
+─────────────────────── IMAGE BURST ───────────────────────
+t=99   N image-workers dispatched (one task each)
+t=103  All N clicks Generate ≈ simultaneous (within ~4s)
+t=103  All N × 2 variants rendering server-side            ~60s
+t=163  All 2N variants downloaded
+t=165  BATCH_PICK reviewer dispatched
+t=180  Review DONE. ~6 passed, ~2 failed.
+─────────────────────── RETRY (if needed) ─────────────────
+t=180  BATCH_RETRY prompt-writer rewrites 2 prompts        ~10s
+t=190  2 retry workers submit simultaneously
+t=194  2 retries rendering                                 ~60s
+t=254  BATCH_PICK on retries (~5s)
+t=259  All images passed
+─────────────────────── VIDEOS ────────────────────────────
+t=180  First 6 passed shots → 6 video-ready (even while retries run)
+t=182  6 video-workers submit simultaneously
+t=185  6 videos rendering                                  ~120s
+t=259  Retries done → 2 more videos submit
+t=305  First 6 videos done → stream review
+t=325  All videos done + reviewed
+t=325  Manifest already full → stitch (15s)
+t=340  DONE (≈5.7 min)
 ```
 
-#### Rate-limit handling (unchanged from Round 1)
+Without retries: ~5.3 min. With favorable render times: ~4.8 min. The hard floor (VO + Whisper + NBP + Kling + dispatch overhead) is ~4.2 min.
 
-If a worker reports `BLOCKED: suspected_rate_limit`, pause new dispatches for 30s, then resume at half parallelism with a per-worker cap of 2 submissions.
+#### Rate-limit handling (unchanged)
 
-#### Status vocabulary (Round 2 adds `pending_research`)
+If a worker reports `BLOCKED: suspected_rate_limit`, pause new dispatches for 30s, then resume at half parallelism with a per-worker cap of 2 submissions. Same pattern for video workers.
+
+#### Status vocabulary (Round 3 — `pending_research` REMOVED)
 
 `images.<role>.status` values in order:
-1. `pending_research` — Shot Planner initial; visual-researcher will flip to `queued` on marker
-2. `queued` — ready for an image-worker to claim
-3. `submitting` — worker claimed it, about to click Generate
-4. `rendering` — Generate clicked, server-side render in progress
-5. `rendered` — artifact downloaded, awaiting reviewer
-6. `pass` — reviewer PASS; shot may now progress to video
-7. `fail` — reviewer FAIL; retry (→ back to `queued`) or escalate (→ `escalated`)
-8. `escalated` — retry cap hit; paused awaiting user
+1. `queued` — ready for an image-worker to claim
+2. `submitting` — worker claimed, about to click Generate
+3. `rendering` — Generate clicked, server-side render in progress
+4. `rendered` — variants downloaded, awaiting reviewer
+5. `pass` — reviewer PASS, `selected_variant` set
+6. `fail` — reviewer FAIL; retry (→ `queued`) or escalate
+7. `escalated` — retry cap hit
 
 `video.status` values: `queued` / `claimed_<TAB_INDEX>` / `submitting` / `rendering` / `rendered` / `pass` / `fail` / `escalated`.
+
+Each `images.<role>` also has:
+- `variants`: `[{artifact_path, artifact_asset_id}, ...]` — populated by image-worker, 1-2 entries.
+- `selected_variant`: integer index into `variants`, or `null` until reviewer picks.
 
 #### Key invariants preserved
 
@@ -340,14 +393,16 @@ When dispatching a subagent, include:
 Always pass SKILL_ROOT so subagents can invoke engine scripts without path guessing.
 
 **Parallel dispatch rules (when to send multiple tool calls in one message):**
-- **Phase 1 + Phase 2.5**: dispatch VO synthesis (browser sequence) alongside `creative-director` (Agent call) in ONE orchestrator turn. The VO renders server-side while the creative director thinks. This is the biggest Round 2 win.
-- **Phase 3.7 with ≥4 shots**: 2 `visual-researcher` dispatches in one message, disjoint `SHOT_RANGE`.
-- **Phase 3.7+4 start**: 6 `image-worker` dispatches (one message, distinct `TAB_INDEX`) — fired concurrently with the researchers so workers can claim tasks the instant research flips a shot to `queued`.
-- **Stream reviews**: dispatch `image-reviewer`/`video-reviewer` (SINGLE mode) per completion — these go serial with respect to orchestrator polling (not parallel with each other) because each is cheap and the orchestrator needs verdicts to advance shot state.
-- **Tab pre-warming**: kicked off during Phase 0 as background work (6 tabs navigate to NBP). Not a subagent dispatch — direct browser commands.
-- **Single-dispatch phases** (run alone): `vo-analyst`, `shot-planner`, `prompt-writer` RETRY, stitch.
+- **Phase 1 + Phase 2.5**: dispatch VO synthesis (browser sequence) alongside `creative-director` (Agent call) in ONE orchestrator turn. Biggest Round 2 win — retained in Round 3.
+- **Phase 2.6 (Round 3)**: as soon as claims.json is written, dispatch 2 `visual-researcher` agents in parallel with disjoint `CLAIM_RANGE`. Research now happens on claims.json (not shots.json), entirely hidden behind Whisper runtime.
+- **Phase 4 image burst (Round 3 flagship)**: after Shot Planner, dispatch N image-workers (N = total_image_tasks, up to 10) in ONE orchestrator message. Each worker owns its own pre-warmed tab and one image task. All N click Generate within ~4s of each other → true parallel renders.
+- **BATCH_PICK review**: ONE `image-reviewer` dispatch reviews all N images together (evaluates both variants per image, picks best). Replaces stream SINGLE reviews.
+- **BATCH_RETRY prompt rewrite**: if reviewer returns ≥2 failures, ONE `prompt-writer` dispatch in BATCH_RETRY mode rewrites all failed prompts in a single agent call.
+- **Stream video reviews**: `video-reviewer` SINGLE dispatched per video completion (same as Round 2).
+- **Tab pre-warming**: kicked off during Phase 0 as background work. Count tabs to `min(total_image_tasks, 10)`. Not a subagent dispatch — direct browser commands.
+- **Single-dispatch phases**: `vo-analyst`, `shot-planner`, `prompt-writer` RETRY (legacy single-failure path), stitch.
 
-The rule of thumb: dispatch in parallel when tasks are truly independent AND workers won't fight for shared state. Image-workers own disjoint tabs AND the claim protocol is atomic (`status=submitting` + `claimed_by=<TAB_INDEX>` re-check), so N workers can safely share the queue. Researchers own disjoint shot ranges — safe. Creative-director + VO synth operate on completely different resources (LLM + browser audio page) — safe.
+The rule of thumb: dispatch in parallel when tasks are truly independent AND workers won't fight for shared state. Image-workers own disjoint tabs AND each gets a unique task (no contention). Researchers own disjoint claim ranges. Creative-director + VO synth operate on completely different resources.
 
 ## Self-learning rules (skill auto-edit)
 
