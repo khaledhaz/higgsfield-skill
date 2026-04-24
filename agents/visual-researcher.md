@@ -68,11 +68,25 @@ For each identified element:
    - Person from country X: typical complexion range, common attire in that context (military uniform style, business dress norms, traditional clothing if relevant), hair characteristics
    - Landscape/environment: vegetation type, terrain color, sky quality, architectural style of surrounding buildings
 
-3. **Reference image URL collection** (ONLY when the element is a specific named thing). From WebSearch result snippets, extract URLs that point to news-agency / official-source / satellite-imagery / well-known-photography pages. You can optionally `WebFetch` a candidate page to verify it's a real photo page.
+3. **Reference image URL collection + download** (ONLY when the element is a specific named thing).
+
+   (a) From WebSearch result snippets, extract URLs that point to news-agency / official-source / satellite-imagery / well-known-photography pages. You can optionally `WebFetch` a candidate page to verify it's a real photo page.
+
+   (b) For each candidate URL that looks like a direct image (ends `.png`/`.jpg`/`.jpeg`/`.webp`, or a photo-hosting CDN known to serve raw images), download it using the engine helper:
+
+   ```bash
+   OUTPUT_DIR=$(dirname "$CLAIMS_PATH")
+   REF_DIR="$OUTPUT_DIR/references/claim_$CLAIM_ID"
+   LOCAL_PATH=$(python3 "$SKILL_ROOT/engine/reference_downloader.py" "$URL" "$REF_DIR" 2>/dev/null) || LOCAL_PATH=""
+   ```
+
+   Collect the **local paths** (not URLs) where the downloads succeeded. Skip URLs that failed — they're most likely HTML pages or blocked.
 
    Do NOT collect reference URLs for generic elements ("a government corridor", "an industrial facility"). Only for NAMED specifics.
 
    Do NOT use random social media images. If the source is unclear or shady, skip.
+
+   Target 1–3 downloaded references per named element. Stop after 3 successful downloads for that element.
 
 4. **Enrich the concept_prompt(s)** with the accurate visual details you found. You are APPENDING descriptive accuracy to the existing prompt — not rewriting the composition, camera angle, or editorial intent.
 
@@ -118,9 +132,11 @@ for c in claims:
         c["research_notes_start"] = notes_start
         if c.get("technique") == "start_end":
             c["research_notes_end"] = notes_end
-        c["reference_urls_start"] = url_list_start  # list of strings, may be empty
+        c["reference_urls_start"] = url_list_start  # list of strings, may be empty — source URLs for audit
+        c["reference_images_start"] = local_paths_start  # list of absolute paths to downloaded files
         if c.get("technique") == "start_end":
             c["reference_urls_end"] = url_list_end
+            c["reference_images_end"] = local_paths_end
         break
 
 # Atomic write via tempfile + rename
@@ -165,7 +181,7 @@ If any invariant is broken, revert that one claim's enrichment and log it at low
 
 ## How your output gets used downstream
 
-The Shot Planner (Sonnet, runs after Whisper) reads `claims.json` and copies your enriched `concept_prompt_start` / `concept_prompt_end` directly into `shots.json` image slots. It also copies `reference_urls_start` / `reference_urls_end` into `images.<role>.reference_urls` and `research_notes_start` / `research_notes_end` into `images.<role>.research_notes`.
+The Shot Planner (Sonnet, runs after Whisper) reads `claims.json` and copies your enriched `concept_prompt_start` / `concept_prompt_end` directly into `shots.json` image slots. It also copies `reference_urls_start` / `reference_urls_end` into `images.<role>.reference_urls`, `research_notes_start` / `research_notes_end` into `images.<role>.research_notes`, and `reference_images_start` / `reference_images_end` into `images.<role>.reference_images`. The Creative Director's subsequent `reference_images` field (if present in the claim — added in Round 4) supersedes the researcher's list per claim; see creative-director.md for the promotion rules.
 
 By the time the image-worker submits, the concept_prompt is already accuracy-enriched — no research gate, images go straight from `queued` to `submitting`.
 
@@ -176,6 +192,7 @@ DONE
 claims_researched: <N>
 elements_researched: <total across all claims>
 reference_urls_found: <count>
+reference_images_downloaded: <count of files successfully written>
 prompts_enriched: <count of concept_prompt_* fields modified>
 prompts_unchanged: <count that needed no accuracy fixes>
 research_log: <path to research_log.md>
@@ -193,5 +210,6 @@ invariants_ok: <Y/N summary — if N, list which claims were reverted>
 - NEVER research elements that are generic/atmospheric.
 - NEVER inject political framing or editorial judgment.
 - NEVER source reference URLs from random social media.
+- NEVER delete a reference image that's already on disk — the downloader is idempotent by URL hash, so re-runs are safe. If a download fails, just leave the existing files alone and append new ones.
 - NEVER write outside your `CLAIM_RANGE`. Your sibling owns other claims.
 - When in doubt about accuracy, still write your best enrichment and note LOW confidence. A slightly inaccurate enrichment is better than no enrichment.
