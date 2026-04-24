@@ -109,7 +109,25 @@ Specifically:
 - **Style bleed check.** If the `concept_prompt` itself (not the concatenated `prompt`) contains palette, grain, lighting, or grade words — e.g., "teal-orange", "matte 35mm", "shallow DOF", "cream-yellow haze-backlit", "desaturated olive-khaki" — mark FAIL with reason `style_vocabulary_in_concept_prompt`. The concept must be pure subject/scene; style is handled separately by the orchestrator-injected `style_prompt`. This prevents retry rewrites from accidentally shifting the package's visual identity.
 - **Physical accuracy check.** Also read `images.<role>.research_notes` if present (set by the Phase 3.7 visual-researcher). If the notes call out specific real-world details the image is supposed to exhibit — a building's shape/material, a weapon system's silhouette, a country-specific attire or landscape, an industrial-equipment layout — and the rendered image clearly contradicts them (e.g., notes say "long rectangular concrete centrifuge halls with flat roofs in arid Iranian plateau" but the image shows a gleaming glass skyscraper in a forest), mark FAIL with reason `accuracy_mismatch: <what's wrong>`. This check is SECONDARY to claim-content and technique compliance — only apply it when the image otherwise passes those. If research_notes are absent or generic, skip this check.
 
-Soft-pass policy (only use sparingly): if the image clearly visualizes the *spirit* of the claim and omits only a minor quantitative detail (e.g., "3 ships" but image shows 2 ships), you MAY pass IF the `attempts` counter for this image is ≥ 3 (so we're in the latter retries and further attempts are unlikely to help). Cite this in the reason. Soft-pass is NOT available for technique_mismatch or style_vocabulary_in_concept_prompt failures — those are always hard FAILs.
+### Cinematographic quality checks
+
+Read the shot's `concept_prompt` for its declared shot type, camera angle, and composition cues (the Creative Director writes these per `references/cinematography.md`). Then check the generated image:
+
+- **Shot type compliance.** If the concept opens with "Close-up", the subject must fill most of the frame. A wide establishing shot for a "Close-up" concept = FAIL with reason `shot_type_mismatch: expected_close_up_got_wide`. If "Wide shot", the full environment must be visible with the subject contextualized within it. If "Extreme close-up", the frame must be filled by a single detail.
+- **Depth.** For Wide and Medium shots, check for at least 2 visible depth planes (foreground vs background, or foreground/midground/background). A completely flat, single-plane composition = FAIL with reason `flat_composition`. This is the #1 tell of AI-generated imagery and the easiest to fix with a prompt rewrite.
+- **Lead room.** If the subject has a clear facing direction (a vessel heading right, a figure looking left), there should be space in the direction they face. Subject facing right but crammed against the right edge = FAIL with reason `no_lead_room`.
+
+These checks are applied AFTER claim content and technique compliance — only if the image otherwise passes those. They catch shots that are technically right but cinematically lazy.
+
+### Cross-shot continuity check
+
+Read `$OUTPUT_DIR/continuity_notes.txt` if it exists and is non-empty (the Shot Planner writes this from the CD's package-wide anchors). For each reviewed image:
+
+- If the shot depicts a location or entity mentioned in `continuity_notes`, verify the image matches the anchored description. Example: notes say "Natanz = flat-roofed parallel concrete halls on brown-beige plateau"; image shows domed structures = FAIL with reason `continuity_violation: <one-line description of the mismatch>`.
+- This check catches the Visual Researcher adding accurate details for one shot but the Creative Director using different details for another shot depicting the same place.
+- If `continuity_notes.txt` is missing, empty, or generic, skip this check entirely.
+
+Soft-pass policy (only use sparingly): if the image clearly visualizes the *spirit* of the claim and omits only a minor quantitative detail (e.g., "3 ships" but image shows 2 ships), you MAY pass IF the `attempts` counter for this image is ≥ 3 (so we're in the latter retries and further attempts are unlikely to help). Cite this in the reason. Soft-pass is NOT available for technique_mismatch, style_vocabulary_in_concept_prompt, shot_type_mismatch, flat_composition, or continuity_violation failures — those are always hard FAILs.
 
 ## Output format
 
