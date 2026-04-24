@@ -202,144 +202,127 @@ Also **pre-build the stitch manifest template** right here:
 ```
 Save as `$OUTPUT_DIR/manifest_template.json`. Phase 5 will fill in clip paths as videos download; Phase 6 runs stitch without any extra setup.
 
-### Phase 4 — Image burst + BATCH_PICK review + BATCH_RETRY (Round 3)
+### Phase 4 — Single-tab burst images + BATCH_PICK review + BATCH_RETRY (Round 4)
 
-Round 3 collapses the image phase into a single simultaneous burst. Research already ran (Phase 2.6), so every concept_prompt is enriched when Phase 3 finishes. Shot Planner writes `shots.json` with all images `status=queued`. The orchestrator immediately fires N image-workers — one per image task, all in one message — and they prime+reload+click in parallel. `batch_size=1` in localStorage means each submission produces one rendered image (worker records it as a single-entry `variants` array with `selected_variant=0` pre-set). The variants-array wrapper stays in the schema so downstream consumers (video-worker, stitch) use one stable shape regardless of batch size. The reviewer still runs in BATCH_PICK mode — it just confirms the single variant per image and flips `status=pass`/`fail`.
-
-#### Tab pre-warming (sized to the image count, Round 3)
-
-At the end of Phase 0, the orchestrator counts image tasks from the Creative Director's DONE report (`total_images_to_gen`) and kicks off tab pre-warming for that many tabs, capped at 10:
-
-```
-N_tabs = min(total_image_tasks, 10)
-for i in 0..N_tabs-1:
-  browser_tabs action=create
-  browser_navigate (on each) to https://higgsfield.ai/ai/image?model=nano-banana-pro
-  verify Unlimited toggle ON
-```
-
-Tabs warm up in parallel with VO + Creative Director + Whisper + research. By the time Phase 4 starts (~t=99), all N tabs are ready.
+Round 4 collapses Phase 4 into a single NBP tab driven by ONE burst worker (Haiku). The worker runs a 5-item preflight checklist before each Generate click (model, unlimited, aspect, prompt, reference_images), auto-remediates failures with per-check retry counts capped at 5, and pauses with a self-learning hook on exhaustion. The reviewer still runs in BATCH_PICK mode, but `batch_size=1` means each submission produces exactly one variant — BATCH_PICK just confirms pass/fail across the set.
 
 #### Step-by-step orchestration
 
-1. **Dispatch N image-workers in ONE orchestrator turn** (N = total_image_tasks ≤ 10). Each gets a distinct `TAB_INDEX` and exactly one `{shot_id, role}` task (single-task mode — see `agents/image-worker.md`).
+1. **Dispatch one `image-worker` (Haiku)** with the full task list:
+   - `TASKS` = all `(shot_id, role)` pairs where `images.<role>.status == "queued"`, sorted by shot_id then role (start before end).
+   - `OUTPUT_DIR`, `SHOTS_PATH`, `PROJECT_ASPECT` (from frontmatter), `SKILL_ROOT`, `SLUG`.
+   - Worker attaches to the pre-opened `image` tab, loops submit-with-preflight across all tasks, then polls+downloads until the gallery drains.
 
-   The orchestrator sends N Agent tool calls in a single message. Each worker:
-   - Attaches to its pre-warmed tab.
-   - Loads the concept+style prompt.
-   - Primes `hf:image-form-upd` + `hf:nano-banana-2-image-form-3` (with `batch_size: 1`).
-   - Reloads, preflights, clicks Generate.
-   - Polls for the single render (by submission timestamp).
-   - Downloads it.
-   - Records it as `images.<role>.variants = [{path, uuid}]` with `selected_variant=0` (only one to pick).
-   - Marks `status=rendered`.
-   - Reports DONE.
+2. **Wait for worker DONE or PAUSED.**
 
-   All N workers click Generate within ~4s of each other. All N renders run server-side simultaneously, completing ~60-90s later.
+   **On PAUSED**: the worker has already appended `### Q:` to the project note and flipped `status: paused`. Surface the question to the user as a plain message ("Phase 4 paused on shot N preflight failure — check project note"), exit the orchestration turn cleanly. User re-invokes `run <slug>` after writing `### A: ...`; intake re-dispatches the burst worker for remaining queued tasks. Self-learn hook fires on resume if `### A: fixed <reason>` (see Self-learning routing table in § "Self-learning rules" below).
 
-2. **Wait for all N workers to report DONE** (or fail). Typical wall clock for the burst: ~80-100s. All N images are on disk (one variant each with `batch_size=1`).
+   **On DONE**: continue.
 
-3. **Dispatch one BATCH_PICK reviewer** for all N image tasks in one Agent call. With `batch_size=1`, there's one variant per image, so BATCH_PICK is effectively a batch review — it confirms the single variant against the rubric and flips status:
-   - Reads the one variant per image (`variants[0]`).
-   - Evaluates against the full rubric (visual_concept match, technique compliance, accuracy, count rules).
-   - Leaves `selected_variant=0` (worker pre-set it); no pick decision needed.
-   - Marks `status=pass` (or `fail` if the variant doesn't meet the rubric).
-   - For `start_end` morph pairs, verifies coherence across the selected start + end variants.
-   - Returns a per-task verdict block.
+3. **Dispatch one BATCH_PICK `image-reviewer`** across all rendered tasks (same as Round 3). It evaluates each single variant against the rubric and flips `status=pass` or `status=fail` per image.
 
-   Typical wall clock: ~15-20s (vs N × 5s of stream review in Round 2).
+4. **If any images failed**: dispatch ONE `prompt-writer` in BATCH_RETRY mode to rewrite all failed concept_prompts in one agent call. Reset failed images to `status=queued`, `variants=[]`, `selected_variant=null`. Then re-dispatch a fresh burst worker with only the failed tasks. Repeat up to `retries_per_shot` times; cap-hit → escalate via `## Questions`.
 
-4. **If any images failed**: dispatch ONE `prompt-writer` in `BATCH_RETRY` mode with the full failure list. The prompt-writer rewrites all failed concept_prompts in a single agent call, clears each failed image's `variants=[]` and `selected_variant=null`, and sets `status=queued`. Typical wall clock: ~10-12s.
+   Usually the first burst clears most images. Retries are 0-2 shots.
 
-5. **Retry burst**: dispatch a fresh wave of N_retry image-workers (one per failed task) in one message, same single-task pattern. Same BATCH_PICK review after. Repeat up to `retries_per_shot` times; cap-hit → escalate to `## Questions`.
+5. **Manifest filling** (unchanged): as video clips download later, fill in `manifest_template.json`'s clip paths in place.
 
-   Usually the first batch_size=2 pass clears ≥75% of images, so retries are 0-2 shots total. With batch_size=2 on the retry, both-variant-failure is rare (~12%). One retry wave is usually enough.
+#### Phase 5 — Videos (simplified from Round 3 — no stream pipelining with Phase 4)
 
-6. **Manifest filling** (unchanged from Round 2): as video clips download later, fill in `manifest_template.json`'s clip paths in place.
+In Round 4, videos wait until ALL Phase 4 images are reviewed (all `status=pass`). No more "start video-worker as each image passes individually" — that pipelining added ~15-20s of overlap but required a polling pattern that Round 4 deliberately avoids.
 
-#### Phase 5 — Videos (unchanged except for variant lookup)
+After Phase 4 reports all images `pass`:
 
-As each shot's images all pass review (`status=pass` + `selected_variant` set), the video becomes `video_ready`. Video-workers claim via `next_video_ready` (which now also gates on `selected_variant` being valid). Each video-worker reads the SELECTED variant's asset UUID for `inputImage` / `endImage`:
+1. Dispatch up to 6 `video-worker` subagents in one message (one per shot), each owning a Kling 3.0 composer tab. Each worker reads its shot's selected variant's asset UUID:
 
-```bash
-START_UUID=$(shot_state.py selected_variant shots.json <id> start artifact_asset_id)
-END_UUID=$(shot_state.py selected_variant shots.json <id> end artifact_asset_id)  # if start_end
-```
+   ```bash
+   START_UUID=$(python3 $SKILL_ROOT/engine/shot_state.py selected_variant "$SHOTS_PATH" <id> start artifact_asset_id)
+   END_UUID=$(python3 $SKILL_ROOT/engine/shot_state.py selected_variant "$SHOTS_PATH" <id> end artifact_asset_id)  # if start_end
+   ```
 
-Rest of video flow identical to Round 2: localStorage priming (`flow-create-video-<date>` + `hf:video-kling-3-store:v2`), reload, preflight, Generate. Stream review per completion. Tab reuse from freed image-worker tabs.
+2. Video flow identical to Round 3: localStorage priming (`flow-create-video-<date>` + `hf:video-kling-3-store:v2`), reload, preflight, Generate.
 
-#### Timeline for a 6-shot / 8-image project (Round 3)
+3. Stream review per completion (unchanged — video-reviewer dispatches per video as clips finish).
+
+4. Retries follow the same pattern as Round 3.
+
+#### Timeline for a 6-shot / 8-image project (Round 4)
 
 ```
-t=0    Intake + style string + script.txt + tab warmup kickoff       5s
-t=5    VO gen (45s)                                       ──┐
-t=5    Creative Director (40s)                            ──┤ PARALLEL
-t=5    N NBP tabs warming (~15s)                          ──┘
-t=20   All N tabs ready
+t=0    Intake + style string + script.txt + single image tab opened    5s
+t=5    VO gen (45s)                                         ──┐
+t=5    Creative Director (40s)                              ──┤ PARALLEL
+t=5    (no N-tab warmup anymore — single tab ready at t=5)    ┘
 t=45   Creative Director DONE → claims.json
-t=45   Research A + B dispatched (parallel, on claims.json) ─┐
-t=50   VO downloaded                                          │ PARALLEL
+t=45   Research A + B dispatched (parallel on claims.json)  ─┐
+                                                              │ PARALLEL
+t=50   VO downloaded                                          │
 t=57   Whisper starts                                         │
-t=70   Research DONE → claims.json enriched                  ─┘
+t=70   Research DONE → claims.json enriched (+ ref images)   ─┘
 t=82   Whisper DONE → beats.json
 t=82   Shot Planner (15s)
 t=97   shots.json + style injected + manifest template ready
-─────────────────────── IMAGE BURST ───────────────────────
-t=99   N image-workers dispatched (one task each)
-t=103  All N clicks Generate ≈ simultaneous (within ~4s)
-t=103  All N × 2 variants rendering server-side            ~60s
-t=163  All 2N variants downloaded
-t=165  BATCH_PICK reviewer dispatched
-t=180  Review DONE. ~6 passed, ~2 failed.
-─────────────────────── RETRY (if needed) ─────────────────
-t=180  BATCH_RETRY prompt-writer rewrites 2 prompts        ~10s
-t=190  2 retry workers submit simultaneously
-t=194  2 retries rendering                                 ~60s
-t=254  BATCH_PICK on retries (~5s)
-t=259  All images passed
-─────────────────────── VIDEOS ────────────────────────────
-t=180  First 6 passed shots → 6 video-ready (even while retries run)
-t=182  6 video-workers submit simultaneously
-t=185  6 videos rendering                                  ~120s
-t=259  Retries done → 2 more videos submit
-t=305  First 6 videos done → stream review
-t=325  All videos done + reviewed
-t=325  Manifest already full → stitch (15s)
-t=340  DONE (≈5.7 min)
+─────────────────────── BURST IMAGES ────────────────────────
+t=97   Image-worker dispatched with TASKS array
+t=100  First preflight passes, Generate clicked
+t=102  Second preflight + Generate
+t=104  ...
+t=124  All 8 submits in-flight (8 × ~3s = 24s)
+t=124  Render phase (server-side parallel)                    ~60-90s
+t=200  All 8 variants downloaded
+t=200  BATCH_PICK reviewer dispatched
+t=218  Review DONE — 6 passed, 2 failed
+─────────────────────── RETRY (if needed) ──────────────────
+t=218  BATCH_RETRY prompt-writer rewrites 2 prompts           ~10s
+t=228  2 retry tasks sent in new burst wave                   ~8s
+t=236  2 retry renders                                         ~60-90s
+t=290  BATCH_PICK on retries                                   ~5s
+t=295  All images passed
+─────────────────────── VIDEOS ──────────────────────────────
+t=295  6 video-workers dispatched in parallel
+t=300  6 videos rendering                                      ~120s
+t=420  Stream video reviews running
+t=440  All videos DONE + reviewed
+t=440  Manifest fill → stitch (15s)
+t=455  DONE (≈7.6 min)
 ```
 
-Without retries: ~5.3 min. With favorable render times: ~4.8 min. The hard floor (VO + Whisper + NBP + Kling + dispatch overhead) is ~4.2 min.
+Without retries: ~5.8 min. Hard floor (VO + Whisper + NBP + Kling + burst sequential submits + dispatch overhead) is ~4.8 min.
 
-#### Rate-limit handling (unchanged)
+Round 4 is ~15-20s slower than Round 3 on the happy path. The tradeoff is single-tab simplicity, per-shot preflight validation, and built-in pause-and-self-learn for UI drift.
 
-If a worker reports `BLOCKED: suspected_rate_limit`, pause new dispatches for 30s, then resume at half parallelism with a per-worker cap of 2 submissions. Same pattern for video workers.
+#### Rate-limit handling
 
-#### Status vocabulary (Round 3 — `pending_research` REMOVED)
+If the burst worker reports `BLOCKED: suspected_rate_limit` on Generate click, it pauses for 30s, then resumes. If the block persists for >3 consecutive submissions, it exits with PAUSED and surfaces the rate-limit to the user.
+
+#### Status vocabulary (Round 4 — unchanged from Round 3)
 
 `images.<role>.status` values in order:
-1. `queued` — ready for an image-worker to claim
-2. `submitting` — worker claimed, about to click Generate
+1. `queued` — ready for the burst worker to submit
+2. `submitting` — worker is clicking Generate
 3. `rendering` — Generate clicked, server-side render in progress
-4. `rendered` — variants downloaded, awaiting reviewer
-5. `pass` — reviewer PASS, `selected_variant` set
+4. `rendered` — variant downloaded, awaiting reviewer
+5. `pass` — reviewer PASS, `selected_variant` set (always 0 with `batch_size=1`)
 6. `fail` — reviewer FAIL; retry (→ `queued`) or escalate
 7. `escalated` — retry cap hit
 
-`video.status` values: `queued` / `claimed_<TAB_INDEX>` / `submitting` / `rendering` / `rendered` / `pass` / `fail` / `escalated`.
+`video.status` values: `queued` / `claimed_<TAB_INDEX>` / `submitting` / `rendering` / `rendered` / `pass` / `fail` / `escalated` (unchanged).
 
 Each `images.<role>` also has:
-- `variants`: `[{artifact_path, artifact_asset_id}, ...]` — populated by image-worker, 1-2 entries.
-- `selected_variant`: integer index into `variants`, or `null` until reviewer picks.
+- `variants`: `[{artifact_path, artifact_asset_id}]` — single-entry array populated by worker.
+- `selected_variant`: `0` — pre-set by worker (nothing to pick between at `batch_size=1`).
+- `reference_images`: array of absolute paths (from CD via shot-planner). May be empty.
 
 #### Key invariants preserved
 
-- Every image still passes the image-reviewer rubric before its video is submitted — the stream review pattern does NOT skip review, it just runs per-image instead of per-batch.
+- Every image still passes the image-reviewer rubric before its video is submitted.
 - Retry count per shot is unchanged (`retries_per_shot` from frontmatter, default 5).
-- Every video still passes the preflight checklist (start-frame UUID match, prompt match, model = Kling 3.0, expected credit cost) before Generate is clicked.
+- Every video still passes the preflight checklist before Generate is clicked.
 - Stitcher still trims non-last clips to exact float `shot.duration` and last clip still gets its +1s tail.
-- Shot durations still sum to VO_DURATION exactly (enforced by Shot Planner).
+- Shot durations still sum to VO_DURATION exactly.
 - Technique-variety rule still enforced (Creative Director side).
-- No "no text / no logos" in concept_prompts (style bleed guard still applies post-research).
+- No "no text / no logos" in concept_prompts.
+
 
 ### Phase 6 — Stitch (manifest already templated in Phase 3.5)
 
@@ -397,14 +380,14 @@ Always pass SKILL_ROOT so subagents can invoke engine scripts without path guess
 **Parallel dispatch rules (when to send multiple tool calls in one message):**
 - **Phase 1 + Phase 2.5**: dispatch VO synthesis (browser sequence) alongside `creative-director` (Agent call) in ONE orchestrator turn. Biggest Round 2 win — retained in Round 3.
 - **Phase 2.6 (Round 3)**: as soon as claims.json is written, dispatch 2 `visual-researcher` agents in parallel with disjoint `CLAIM_RANGE`. Research now happens on claims.json (not shots.json), entirely hidden behind Whisper runtime.
-- **Phase 4 image burst (Round 3 flagship)**: after Shot Planner, dispatch N image-workers (N = total_image_tasks, up to 10) in ONE orchestrator message. Each worker owns its own pre-warmed tab and one image task. All N click Generate within ~4s of each other → true parallel renders.
-- **BATCH_PICK review**: ONE `image-reviewer` dispatch reviews all N images together (evaluates both variants per image, picks best). Replaces stream SINGLE reviews.
-- **BATCH_RETRY prompt rewrite**: if reviewer returns ≥2 failures, ONE `prompt-writer` dispatch in BATCH_RETRY mode rewrites all failed prompts in a single agent call.
-- **Stream video reviews**: `video-reviewer` SINGLE dispatched per video completion (same as Round 2).
-- **Tab pre-warming**: kicked off during Phase 0 as background work. Count tabs to `min(total_image_tasks, 10)`. Not a subagent dispatch — direct browser commands.
+- **Phase 4 image burst (Round 4)**: after Shot Planner, dispatch ONE `image-worker` with the full TASKS array. Worker loops submit-with-preflight sequentially across all tasks on a single tab, then polls+downloads until the gallery drains. No N-tab warmup.
+- **BATCH_PICK review**: ONE `image-reviewer` dispatch reviews all images together (evaluates single variant per image, confirms pass/fail). Replaces stream SINGLE reviews.
+- **BATCH_RETRY prompt rewrite**: if reviewer returns ≥1 failure, ONE `prompt-writer` dispatch in BATCH_RETRY mode rewrites all failed prompts in a single agent call.
+- **Phase 5 video workers**: up to 6 `video-worker` subagents dispatched in ONE orchestrator message after ALL images pass (no pipelining with Phase 4 in Round 4).
+- **Stream video reviews**: `video-reviewer` SINGLE dispatched per video completion (same as Round 3).
 - **Single-dispatch phases**: `vo-analyst`, `shot-planner`, `prompt-writer` RETRY (legacy single-failure path), stitch.
 
-The rule of thumb: dispatch in parallel when tasks are truly independent AND workers won't fight for shared state. Image-workers own disjoint tabs AND each gets a unique task (no contention). Researchers own disjoint claim ranges. Creative-director + VO synth operate on completely different resources.
+The rule of thumb: dispatch in parallel when tasks are truly independent AND workers won't fight for shared state. Video-workers own disjoint tabs AND each gets a unique shot (no contention). Researchers own disjoint claim ranges. Creative-director + VO synth operate on completely different resources.
 
 ## Self-learning rules (skill auto-edit)
 
