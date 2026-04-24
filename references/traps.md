@@ -164,6 +164,43 @@ Most video models default Enhance=ON. Your typed prompt is server-side expanded 
 <!-- auto-edit:traps category=label-naming -->
 <!-- /auto-edit:traps -->
 
+## NBP multimodal attachments
+
+### 23. NBP reference-image attachments — DOM contract
+Captured 2026-04-24 via live-tour with user. NBP supports multimodal reference attachments alongside the text prompt, uploaded to the user-scoped CDN.
+
+**Accept types**: `image/jpeg, image/jpg, image/png, image/webp` (and `text/html` — to handle drags from web pages).
+
+**Attach mechanisms (user-confirmed)**: drag-drop onto the composer card, or Ctrl/Cmd+V paste while focused in the prompt area. Synthetic `DragEvent` + `DataTransfer` via `browser_evaluate` is **silently rejected** by React Hook Form — do NOT try to attach via JS event dispatch. `input.files = dt.files` is also rejected.
+
+**Reliable automation path**: click the "add-more" button at the end of the chip strip. It contains a `<label>` wrapping a real `<input type="file" accept="image/...">`, so clicking it opens the native file chooser, which Playwright's `browser_file_upload` can intercept.
+
+**Post-upload URL shape**: `d2ol7oe51mr4n9.cloudfront.net/user_<PREFIX>/<uuid>.<ext>` (raw CDN), served back in the UI via the `images.higgs.ai` proxy. The UUID in the CDN path is the `asset_id` that NBP references server-side when generating — match chips to reference_images by this UUID.
+
+**DOM contract when attachments are present**:
+
+| Element | Selector |
+|---|---|
+| Chip strip (flex wrap of chips + add-more button) | `div.flex.items-center.gap-2.flex-wrap` (direct parent of chips, above the Lexical editor) |
+| Chip (one per attached file) | `div.relative.rounded-xl.bg-neutral-surface-subtle.group.shrink-0.size-14` |
+| Chip thumbnail image | `img[alt="object image"]` (src proxied via `images.higgs.ai`; raw CDN URL is in the `url=` query param, URL-decoded) |
+| Chip remove-X button | First `<button>` inside chip. SVG `viewBox="0 0 20 20"`, path starts `M3.81246 3.81246` |
+| Chip replace-with-new-file button | Second `<button>` inside chip (`class="size-full"`). Contains its own `<input type="file">` — click to trigger file chooser for REPLACING this slot |
+| Add-more button (empty-strip OR append) | Button at end of chip strip, class `size-full`, contains `<label><input type="file" accept="image/jpeg,image/jpg,image/png,image/webp">` — click to trigger file chooser for NEW attachment |
+
+**Multi-attach**: tested. Original `#image-form-reference` input (only present on some UI states) had `multiple=true`. The add-more button creates a new chip per file; call it N times to attach N files.
+
+**Persistence across submits**: TBD — the live tour only tested up to the attach stage, not across a full Generate cycle. Implementer should verify during Task 6 smoke run and update this line.
+
+**Extracting the asset UUID from a chip**: parse `img[alt="object image"]`'s `src` — decode the `url=` query param, regex `/user_[A-Za-z0-9]+\/([a-f0-9-]{36})\./`.
+
+**Removing an attachment**: click the remove-X button inside the chip. Chip vanishes from the strip.
+
+**Unlimited toggle sticky behavior**: navigating to/from the NBP page or reloading sometimes leaves `data-state="off"` on the switch even when localStorage says `use_unlimited=true`. Always click the wrapper button `button[role="switch"]`'s parent (`button[id^="react-aria"]`) — clicking the inner `[role="switch"]` directly can be silently intercepted. Verify via `#hf:image-form-submit` textContent containing `"Unlimited"` before every Generate click.
+
+<!-- auto-edit:traps category=nbp-multimodal -->
+<!-- /auto-edit:traps -->
+
 ## Red flags that mean "stop and check"
 
 - You're about to click Generate on FLUX.2 Pro — **confirm Unlimited toggle ON**
