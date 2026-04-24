@@ -84,7 +84,7 @@ When that cron fires, Claude Code runs the "scheduler sweep" procedure:
 The user can manage the cron via `CronList` / `CronDelete` (builtin tools).
 
 ### Pause / resume via the note (exit-cleanly)
-- **Pause**: append `### Q: <question>` under `## Questions`, set `status: paused`, `browser_close`, print a clear instruction to the user, exit the current orchestration. Do NOT poll.
+- **Pause**: append `### Q: <question>` under `## Questions`, set `status: paused`, `browser_close`, print a clear instruction to the user, exit the current orchestration. Do NOT poll. Round 4 adds a new pause trigger: the image-worker's preflight checklist hitting its per-check retry cap; the answer format `### A: fixed <reason>` additionally triggers the self-learning routing table (writing a new trap entry to `references/traps.md`).
 - **Resume**: user adds `### A: <answer>` below the most recent `### Q:`, optionally edits other parts of the note, then re-invokes `run <slug>`. Intake detects `status: paused` + presence of `### A:`, clears back to `active`, continues from the point of pause.
 - **Mode D cron**: does NOT auto-resume paused projects. User must flip `status: scheduled` (or `inbox`) manually after answering. This is intentional — avoids re-running projects whose question wasn't actually answered.
 
@@ -92,7 +92,7 @@ The user can manage the cron via `CronList` / `CronDelete` (builtin tools).
 
 You (main Claude session) ARE the orchestrator. Your job is to dispatch subagents, gate phases, and keep the project note in sync.
 
-**Round 2 architectural principle — maximize overlap.** The slow server-side operations (VO gen ~45s, NBP render ~60s, Kling render ~120s) are hard floors. Everything else — creative planning, style building, tab setup, research, reviews — must overlap them rather than stack serially. Target total time for a 6-shot project: ~5–6 min (vs ~19 min pre-optimization).
+**Architectural principle — maximize overlap (carried forward from Round 2).** The slow server-side operations (VO gen ~45s, NBP render ~60s, Kling render ~120s) are hard floors. Everything else — creative planning, style building, research, reviews — must overlap them rather than stack serially. Round 4 additionally runs preflight per submission to catch UI drift (wrong model page, Unlimited toggle flipped off, aspect ratio reverted, stale prompt, missing reference) before it costs a wasted render or a silent miscount. Target total time for a 6-shot project with clean preflights: ~5.5–6 min (Round 3: ~5.3–6 min; Round 4 trades ~15s of parallelism for per-submit validation + pause-and-learn).
 
 ### Phase 0 — Intake + parallel precompute
 
@@ -415,6 +415,11 @@ During engine-mode runs, when you discover a new fact about Higgsfield's behavio
 | Model parameter or cost datum | `references/models.md` | `<!-- auto-edit:model m=<model-id> -->` |
 | Session-wide rule | `SKILL.md` "Current model availability" | `<!-- auto-edit:skill section=availability -->` |
 | User preference revealed mid-run | memory system | new file under `memory/` + MEMORY.md index |
+| Preflight `model` failure resolved | `references/traps.md` | `<!-- auto-edit:traps category=ui-discovery -->` |
+| Preflight `unlimited` failure resolved | `references/traps.md` | `<!-- auto-edit:traps category=cost -->` |
+| Preflight `aspect` failure resolved | `references/traps.md` | `<!-- auto-edit:traps category=ui-commit -->` |
+| Preflight `prompt` failure resolved | `references/traps.md` | `<!-- auto-edit:traps category=session-state -->` |
+| Preflight `refs` failure resolved | `references/traps.md` | `<!-- auto-edit:traps category=nbp-multimodal -->` |
 
 ### Guardrails (strict — never bypass)
 1. **Append-only inside markers.** New content goes between the opening and closing marker tags. You do NOT delete or rewrite existing text. If a new finding directly contradicts an old statement, append a comment `<!-- superseded by auto-edit <YYYY-MM-DD> -->` to the old line — keep the old text for audit.
