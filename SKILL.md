@@ -39,13 +39,14 @@ When asked to **run a project** (by slug, or "run the inbox", or "run X and Y in
 7. **Stitch** — build a manifest JSON from the clips+transitions+VO, call `engine/stitch.sh manifest.json`.
 8. **Finalize** — set `status: done` (or `partial` if any artifact failed), fill `## Outputs` with wiki-links, archive the verbose run log to `$PWD/hf-projects/_runs/<timestamp>-<slug>.md`.
 
-### Tab allocation (lazy-spawn, reuse across phases)
+### Tab allocation (single-tab burst — Round 4.1)
 - `main` — driver's primary. Not a composer.
-- `audio` — pinned to `/audio` during Phase 2.
-- `monitor` — pinned to `/asset/video` for polling results.
-- `workers` — 1..6 Kling 3.0 composer tabs, spawned only as needed by Phase 4/5/6.
+- `audio` — pinned to `/audio` during Phase 1 (VO synthesis).
+- `image` — pinned to `/ai/image?model=nano-banana-pro` during Phase 4 (single-tab NBP burst).
+- `video` — pinned to `/ai/video` (Kling 3.0) during Phase 5 (single-tab Kling burst).
+- `monitor` — pinned to `/asset/video` for polling results when needed.
 
-Cap on worker tabs is 6 regardless of shot count. If shot count > 6, batch submissions in waves of 6.
+**No multi-tab worker pool.** Phases 4 and 5 each run on ONE tab, submitting all shots sequentially in a fast burst. Server-side render parallelism does not depend on client-tab count, and a single tab is meaningfully faster end-to-end than fanning out: there's no per-tab warmup, no React-state-restoration race across N tabs, no risk of N parallel workers hitting per-session token caps. User-validated 2026-04-25.
 
 ### QC loop (per artifact, max 3 attempts)
 After each artifact downloads, run a vision check:
@@ -227,24 +228,26 @@ Round 4 collapses Phase 4 into a single NBP tab driven by ONE burst worker (Haik
 
 5. **Manifest filling** (unchanged): as video clips download later, fill in `manifest_template.json`'s clip paths in place.
 
-#### Phase 5 — Videos (simplified from Round 3 — no stream pipelining with Phase 4)
+#### Phase 5 — Videos (single-tab Kling 3.0 burst — Round 4.1)
 
-In Round 4, videos wait until ALL Phase 4 images are reviewed (all `status=pass`). No more "start video-worker as each image passes individually" — that pipelining added ~15-20s of overlap but required a polling pattern that Round 4 deliberately avoids.
+In Round 4.1, Phase 5 mirrors Phase 4: ONE `video-worker` subagent owns a single `video` tab and burst-submits every shot sequentially via localStorage priming. **Do NOT** dispatch multiple parallel video-worker tabs — single tab is faster (no warmup, no cross-tab state races) and avoids burning subagent tokens on parallel workers that don't speed up server-side renders.
 
 After Phase 4 reports all images `pass`:
 
-1. Dispatch up to 6 `video-worker` subagents in one message (one per shot), each owning a Kling 3.0 composer tab. Each worker reads its shot's selected variant's asset UUID:
+1. Dispatch ONE `video-worker` subagent with `INITIAL_SHOT_IDS` containing every shot id and `TAB_INDEX` set to a single dedicated `video` tab. The worker reads each shot's selected variant's asset UUID:
 
    ```bash
    START_UUID=$(python3 $SKILL_ROOT/engine/shot_state.py selected_variant "$SHOTS_PATH" <id> start artifact_asset_id)
    END_UUID=$(python3 $SKILL_ROOT/engine/shot_state.py selected_variant "$SHOTS_PATH" <id> end artifact_asset_id)  # if start_end
    ```
 
-2. Video flow identical to Round 3: localStorage priming (`flow-create-video-<date>` + `hf:video-kling-3-store:v2`), reload, preflight, Generate.
+2. For each shot in order: prime `flow-create-video-<date>` + `hf:video-kling-3-store:v2`, reload, click Generate, wait long enough for the request to fly (~3s), move to the next. After all submits are in-flight, poll `/asset/video` for completions and download each MP4 as it lands.
 
-3. Stream review per completion (unchanged — video-reviewer dispatches per video as clips finish).
+3. Stream review per completion (unchanged — video-reviewer dispatches per video as clips finish, but reads the `monitor` tab, not an owned composer).
 
-4. Retries follow the same pattern as Round 3.
+4. Retries follow the same pattern as Phase 4: failed renders go back into the burst worker's queue.
+
+**Pitfall — start-frame rehydration**: Setting `form.inputImage = <UUID>` in localStorage is not always enough; the React composer may render an empty Start-frame slot even though localStorage holds the UUID. If the gallery shows no new "Generating" tile after a Generate click, suspect this — drop into the Start-frame box via click + `browser_file_upload` of the local PNG, then click Generate again. The orchestrator already has the local PNGs at `$OUTPUT_DIR/shots/shotNN_start.png`.
 
 #### Timeline for a 6-shot / 8-image project (Round 4)
 
@@ -278,11 +281,13 @@ t=228  2 retry tasks sent in new burst wave                   ~8s
 t=236  2 retry renders                                         ~60-90s
 t=290  BATCH_PICK on retries                                   ~5s
 t=295  All images passed
-─────────────────────── VIDEOS ──────────────────────────────
-t=295  6 video-workers dispatched in parallel
-t=300  6 videos rendering                                      ~120s
-t=420  Stream video reviews running
-t=440  All videos DONE + reviewed
+─────────────────────── VIDEOS (Round 4.1 single-tab burst) ─
+t=295  ONE video-worker dispatched with INITIAL_SHOT_IDS=[1..N]
+t=298  First Kling submit primed + Generate
+t=302  Second submit (~4s/cycle on single tab incl. nav)
+t=...  All N submits in-flight, server-side parallel renders   ~120s
+t=425  All N videos rendered + downloaded
+t=425  Stream video reviews complete (running during downloads)
 t=440  Manifest fill → stitch (15s)
 t=455  DONE (≈7.6 min)
 ```
@@ -383,11 +388,11 @@ Always pass SKILL_ROOT so subagents can invoke engine scripts without path guess
 - **Phase 4 image burst (Round 4)**: after Shot Planner, dispatch ONE `image-worker` with the full TASKS array. Worker loops submit-with-preflight sequentially across all tasks on a single tab, then polls+downloads until the gallery drains. No N-tab warmup.
 - **BATCH_PICK review**: ONE `image-reviewer` dispatch reviews all images together (evaluates single variant per image, confirms pass/fail). Replaces stream SINGLE reviews.
 - **BATCH_RETRY prompt rewrite**: if reviewer returns ≥1 failure, ONE `prompt-writer` dispatch in BATCH_RETRY mode rewrites all failed prompts in a single agent call.
-- **Phase 5 video workers**: up to 6 `video-worker` subagents dispatched in ONE orchestrator message after ALL images pass (no pipelining with Phase 4 in Round 4).
-- **Stream video reviews**: `video-reviewer` SINGLE dispatched per video completion (same as Round 3).
+- **Phase 5 video burst (Round 4.1)**: after all images pass, dispatch ONE `video-worker` with `INITIAL_SHOT_IDS=[1..N]` on a single `video` tab. Worker bursts every Kling submit sequentially (~4s/cycle), then polls + downloads. Do NOT dispatch multiple video-workers — user-validated 2026-04-25 that single-tab is faster and avoids subagent token-cap blowups.
+- **Stream video reviews**: `video-reviewer` SINGLE dispatched per video completion.
 - **Single-dispatch phases**: `vo-analyst`, `shot-planner`, `prompt-writer` RETRY (legacy single-failure path), stitch.
 
-The rule of thumb: dispatch in parallel when tasks are truly independent AND workers won't fight for shared state. Video-workers own disjoint tabs AND each gets a unique shot (no contention). Researchers own disjoint claim ranges. Creative-director + VO synth operate on completely different resources.
+The rule of thumb: dispatch in parallel only when tasks are truly independent AND parallelism actually shortens wall-clock. Server-side Kling renders are already parallel regardless of how many client tabs submit them, so multiple video-worker tabs add overhead without speedup. Researchers own disjoint claim ranges (true LLM parallelism). Creative-director + VO synth use entirely different resources.
 
 ## Self-learning rules (skill auto-edit)
 
