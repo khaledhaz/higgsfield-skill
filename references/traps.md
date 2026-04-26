@@ -49,6 +49,28 @@ The image page's Lexical editor reads from `hf:image-form-upd.prompt` on mount. 
 <!-- auto-edit:traps category=session-state -->
 ### 10b. `execCommand('delete')` and `innerHTML=''` silently fail on Lexical when batching via JS loop
 Observed 2026-04-23 in oil-hormuz-news run: a loop that did `document.execCommand('selectAll'); document.execCommand('delete'); dispatchPaste(nextPrompt);` per iteration did NOT clear the textbox. Each paste concatenated to the prior text — by iteration 9 the prompt was 10 scripts long. The fallback `ed.innerHTML = ''` also failed (Lexical reconstructs the editor state from its internal model, ignoring direct DOM mutations). **Reliable fix: use Playwright's native `browser_type` (maps to `page.locator().fill()`) between shots.** `fill()` performs a real selectAll+replace that Lexical honors. If you must stay in JS, write to `localStorage['hf:image-form-upd']` and reload the page — but this is slower than native Playwright fill.
+
+### 24. `/ai/video` boots into Seedance 2.0 even when the form key has `modelVersion="kling3_0"`
+Observed 2026-04-26 in russia-ukraine-5th-year run. After `browser_navigate https://higgsfield.ai/ai/video` (or any reload of /ai/video), the composer renders Seedance 2.0 controls (no Start/End-frame slots, "Upload media" instead, ~88-credit Generate label) even though the dated `flow-create-video-<DATE>` localStorage key holds `modelVersion: "kling3_0"` AND the `hf:video-kling-3-store:v2` Kling settings store is fully populated (16:9, std, sound on, duration). The `data-component="model"` element may even read "Kling 3.0" while the actual rendered form is Seedance — internal store and rendered form drift apart.
+
+**Workaround**: after every navigate to `/ai/video`, run a one-time UI switch:
+```js
+Array.from(document.querySelectorAll('button')).find(b => /^Kling 3\.0$/.test((b.textContent||'').trim()))?.click();
+```
+Wait ~2s, then verify by checking that `Array.from(document.querySelectorAll('p')).some(p => p.textContent === 'Start frame')` is `true`. Only then proceed with frame uploads, prompt fill, duration, Generate. Skipping this step burns the next render at Seedance pricing AND on the wrong model.
+
+This applies to **video-worker** subagents in particular — bake the Kling-switch click into the per-shot setup, NOT just the worker startup, because the form can revert mid-burst between shots when the page rehydrates.
+
+### 25. `form.inputImage = "<UUID>"` no longer attaches the start frame on Kling 3.0 composer
+Observed 2026-04-26 in same run. Setting the dated form key's `inputImage` (and `endImage`) to an existing image asset's UUID, then `browser_navigate`-reloading `/ai/video`, does NOT visually attach the frame. The Start/End-frame slots remain empty, and Generate proceeds as text-to-video instead of image-to-video — wrong model branch, wrong pricing.
+
+**Workaround**: always `browser_file_upload` the local PNG into the Start (and End) slot. The local PNG is at `$OUTPUT_DIR/shots/shot{NN}_{start,end}.png` — the orchestrator already saved it during Phase 4. Sequence per shot:
+1. Click Start-frame container (`<p>` with text `"Start frame"` → `closest('div[class*="aspect"]')`).
+2. `browser_file_upload paths=[start_path]`. Wait ~2s.
+3. (start_end only) Repeat for End frame.
+4. Then set prompt + duration + click Generate.
+
+The `inputImage`-via-localStorage path may eventually work again if Higgsfield restores it; verify on each new build. Until then, file_upload is the only reliable attach.
 <!-- /auto-edit:traps -->
 
 ## UI discovery traps (these waste time hunting)

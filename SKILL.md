@@ -241,13 +241,25 @@ After Phase 4 reports all images `pass`:
    END_UUID=$(python3 $SKILL_ROOT/engine/shot_state.py selected_variant "$SHOTS_PATH" <id> end artifact_asset_id)  # if start_end
    ```
 
-2. For each shot in order: prime `flow-create-video-<date>` + `hf:video-kling-3-store:v2`, reload, click Generate, wait long enough for the request to fly (~3s), move to the next. After all submits are in-flight, poll `/asset/video` for completions and download each MP4 as it lands.
+2. **First action on `/ai/video`**: click the Kling 3.0 button to switch the model card. Trap #24 — the composer boots into Seedance 2.0 even when the dated form key has `modelVersion: "kling3_0"`. If you see "Upload media" instead of "Start frame", the model didn't switch. Bake this into per-shot setup, not just startup, because the form can revert mid-burst:
 
-3. Stream review per completion (unchanged — video-reviewer dispatches per video as clips finish, but reads the `monitor` tab, not an owned composer).
+   ```js
+   Array.from(document.querySelectorAll('button')).find(b => /^Kling 3\.0$/.test((b.textContent||'').trim()))?.click();
+   ```
 
-4. Retries follow the same pattern as Phase 4: failed renders go back into the burst worker's queue.
+3. **Always `browser_file_upload` the local PNG for Start (and End) frame** — Trap #25. Setting `form.inputImage = <UUID>` in localStorage no longer attaches the frame in current builds; the slot stays visually empty and Generate proceeds as text-to-video. The orchestrator already saved the local PNGs at `$OUTPUT_DIR/shots/shotNN_{start,end}.png` during Phase 4. Per-shot sequence:
+   1. Clear any prior frames (X-buttons): `Array.from(document.querySelectorAll('button')).filter(b => b.className.includes('-top-2') && b.className.includes('-right-2')).forEach(b => b.click());`
+   2. Click Start-frame container, `browser_file_upload paths=[start_path]`, wait ~2s.
+   3. (start_end only) Same for End frame.
+   4. Set duration via the Kling-store slider commit pattern (see [trap #21](references/traps.md)).
+   5. Replace prompt via Lexical native fill (`browser_type`), not `execCommand`.
+   6. Click Generate. Wait ~4s. Verify a new tile appeared in the gallery — if not, retry the file_upload once.
 
-**Pitfall — start-frame rehydration**: Setting `form.inputImage = <UUID>` in localStorage is not always enough; the React composer may render an empty Start-frame slot even though localStorage holds the UUID. If the gallery shows no new "Generating" tile after a Generate click, suspect this — drop into the Start-frame box via click + `browser_file_upload` of the local PNG, then click Generate again. The orchestrator already has the local PNGs at `$OUTPUT_DIR/shots/shotNN_start.png`.
+4. After all submits are in-flight, poll `/asset/video` for completions and download each MP4 as it lands. Match tiles to shots by submission order (newest = last shot) and verify by prompt text on the asset detail page. Download from `https://d8j0ntlcm91z4.cloudfront.net/<user_path>/hf_<ts>_<uuid>.mp4` (the `cdn.higgsfield.ai` URLs in the DOM thumbnails return 404 for direct .mp4).
+
+5. Stream review per completion (unchanged — video-reviewer dispatches per video as clips finish).
+
+6. Retries follow the same pattern as Phase 4: failed renders go back into the burst worker's queue.
 
 #### Timeline for a 6-shot / 8-image project (Round 4)
 
